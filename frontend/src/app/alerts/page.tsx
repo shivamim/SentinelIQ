@@ -16,11 +16,18 @@ type Alert = {
 export default function AlertsPage() {
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     api.get<Alert[]>("/alerts")
-      .then(setAlerts)
-      .catch(console.error)
+      .then((data) => {
+        setAlerts(data)
+        setError(null)
+      })
+      .catch((err) => {
+        console.error("Failed to fetch alerts:", err)
+        setError(err instanceof Error ? err.message : "Failed to load alerts")
+      })
       .finally(() => setLoading(false))
   }, [])
 
@@ -28,7 +35,16 @@ export default function AlertsPage() {
     <div className="min-h-screen bg-background">
       <NavHeader title="Alerts" />
       <main className="p-6">
-        {loading ? <p>Loading...</p> : (
+        {loading ? (
+          <p className="text-muted-foreground">Loading alerts...</p>
+        ) : error ? (
+          <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-4 text-red-500">
+            <p className="font-semibold">Error loading alerts</p>
+            <p className="text-sm">{error}</p>
+          </div>
+        ) : alerts.length === 0 ? (
+          <p className="text-muted-foreground">No alerts found</p>
+        ) : (
           <div className="rounded-lg border border-border">
             <table className="w-full text-sm">
               <thead>
