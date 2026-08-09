@@ -1,9 +1,32 @@
-/** Supabase client for browser-side auth. */
+/**
+ * Supabase client for browser-side authentication.
+ *
+ * A single shared browser client is used throughout the application
+ * so authentication sessions remain consistent between:
+ * - AuthProvider
+ * - API requests
+ * - Login/logout
+ * - Protected pages
+ */
+
 import { createBrowserClient } from "@supabase/ssr"
 
-export function createClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://placeholder.supabase.co"
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "placeholder-key"
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
-  return createBrowserClient(supabaseUrl, supabaseAnonKey)
+if (!supabaseUrl) {
+  throw new Error(
+    "Missing NEXT_PUBLIC_SUPABASE_URL environment variable"
+  )
 }
+
+if (!supabaseAnonKey) {
+  throw new Error(
+    "Missing NEXT_PUBLIC_SUPABASE_ANON_KEY environment variable"
+  )
+}
+
+export const supabase = createBrowserClient(
+  supabaseUrl,
+  supabaseAnonKey
+)
