@@ -17,6 +17,19 @@ from app.services.bm25 import BM25Search
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
+@router.get("", response_model=List[AlertOut])
+async def list_alerts(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get all alerts from the database."""
+    result = await db.execute(
+        select(Alert).order_by(Alert.created_at.desc())
+    )
+    alerts = result.scalars().all()
+    return alerts
+
+
 @router.post("/ingest", response_model=AlertOut)
 async def ingest_alert(
     payload: AlertIngest,
