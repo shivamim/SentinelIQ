@@ -1,38 +1,128 @@
-"""Supabase Auth — verify JWTs issued by Supabase, NOT custom bcrypt+JWT."""
-from typing import Optional, Literal
-from jose import JWTError, jwt
+"""Supabase Auth — verify JWTs issued by Supabase."""
+
+from typing import Literal
+import json
+import urllib.request
+
+from jose import JWTError, jwt, jwk
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+
 from app.config import get_settings
 from app.database import get_db
 from app.models import User
 
+
 settings = get_settings()
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
-def decode_supabase_token(token: str) -> dict:
-    """Decode and verify a Supabase-issued JWT.
+def _get_supabase_jwks() -> dict:
+    """Fetch Supabase's public JWKS keys."""
 
-    Supabase JWTs are signed with the project's JWT secret.
-    We verify the signature and expiration, then extract claims.
-    """
-    if not settings.SUPABASE_JWT_SECRET:
-        raise RuntimeError("SUPABASE_JWT_SECRET is required for auth verification")
+    if not settings.SUPABASE_URL:
+        raise RuntimeError("SUPABASE_URL is required for auth verification")
+
+    jwks_url = f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json"
+
     try:
+        with urllib.request.urlopen(jwks_url, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to fetch Supabase JWKS: {exc}"
+        ) from exc
+
+
+def decode_supabase_token(token: str) -> dict:
+    """Verify a Supabase JWT, including current ES256 tokens."""
+
+    try:
+        # Read token header without trusting it yet.
+        header = jwt.get_unverified_header(token)
+
+        kid = header.get("kid")
+        algorithm = header.get("alg")
+
+        if not kid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token missing 'kid' claim",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Only allow algorithms we explicitly support.
+        if algorithm not in ("ES256", "HS256"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Unsupported JWT algorithm: {algorithm}",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Current Supabase projects commonly use asymmetric ES256 signing.
+        if algorithm == "ES256":
+            jwks = _get_supabase_jwks()
+
+            key_data = next(
+                (
+                    key
+                    for key in jwks.get("keys", [])
+                    if key.get("kid") == kid
+                ),
+                None,
+            )
+
+            if not key_data:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Supabase signing key not found",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+            public_key = jwk.construct(key_data, algorithm="ES256")
+
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=["ES256"],
+                issuer=f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1",
+                audience="authenticated",
+            )
+
+            return payload
+
+        # Legacy HS256 support.
+        if not settings.SUPABASE_JWT_SECRET:
+            raise RuntimeError(
+                "SUPABASE_JWT_SECRET is required for HS256 auth verification"
+            )
+
         payload = jwt.decode(
             token,
             settings.SUPABASE_JWT_SECRET,
             algorithms=["HS256"],
-            options={"verify_aud": False},  # Supabase uses its own aud
+            options={"verify_aud": False},
         )
+
         return payload
-    except JWTError as e:
+
+    except HTTPException:
+        raise
+
+    except JWTError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid Supabase token: {e}",
+            detail=f"Invalid Supabase token: {exc}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Unable to verify Supabase token: {exc}",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -41,11 +131,13 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """FastAPI dependency: extract and verify Supabase JWT, look up local user."""
+    """Extract and verify Supabase JWT, then look up local user."""
+
     payload = decode_supabase_token(token)
 
-    # Supabase puts the user UUID in 'sub'
+    # Supabase user UUID
     supabase_uid: str = payload.get("sub")
+
     if supabase_uid is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -53,18 +145,35 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Look up local user by supabase_uid
-    result = await db.execute(select(User).where(User.supabase_uid == supabase_uid))
+    # Look up local user.
+    result = await db.execute(
+        select(User).where(User.supabase_uid == supabase_uid)
+    )
+
     user = result.scalar_one_or_none()
 
+    # Automatically create local user if necessary.
     if user is None:
-        # Auto-provision: create local user record from Supabase claims
         email = payload.get("email", "")
-        role = payload.get("app_metadata", {}).get("role", "analyst")
-        # Validate role
-        if role not in ("analyst", "senior_analyst", "admin"):
+
+        role = payload.get("app_metadata", {}).get(
+            "role",
+            "analyst",
+        )
+
+        if role not in (
+            "analyst",
+            "senior_analyst",
+            "admin",
+        ):
             role = "analyst"
-        user = User(supabase_uid=supabase_uid, email=email, role=role)
+
+        user = User(
+            supabase_uid=supabase_uid,
+            email=email,
+            role=role,
+        )
+
         db.add(user)
         await db.commit()
         await db.refresh(user)
@@ -72,13 +181,25 @@ async def get_current_user(
     return user
 
 
-def require_role(*roles: Literal["analyst", "senior_analyst", "admin"]):
-    """Dependency factory: enforce RBAC role requirement."""
-    def checker(current_user: User = Depends(get_current_user)) -> User:
+def require_role(
+    *roles: Literal["analyst", "senior_analyst", "admin"]
+):
+    """Dependency factory for RBAC."""
+
+    def checker(
+        current_user: User = Depends(get_current_user),
+    ) -> User:
+
         if current_user.role not in roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Insufficient permissions. Required: {roles}, have: {current_user.role}",
+                detail=(
+                    f"Insufficient permissions. "
+                    f"Required: {roles}, "
+                    f"have: {current_user.role}"
+                ),
             )
+
         return current_user
+
     return checker
