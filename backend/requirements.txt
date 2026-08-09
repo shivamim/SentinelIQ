@@ -42,6 +42,7 @@ pytest>=8.0.0
 pytest-asyncio>=0.23.0
 aiosqlite>=0.20.0
 email-validator
+python-multipart
 
 # Eval (optional)
 # ragas>=0.2.0
