@@ -1,19 +1,45 @@
-/** Fetch wrapper that adds auth token from Supabase session. */
-export async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
-  try {
-    const { supabase } = await import("@/components/auth-provider")
-    const { data: { session } } = await supabase.auth.getSession()
-    const token = session?.access_token || ""
+/**
+ * Authenticated fetch wrapper for SentinelIQ API requests.
+ *
+ * Gets the current Supabase session and attaches:
+ *
+ * Authorization: Bearer <access_token>
+ *
+ * Protected API requests are never silently retried without authentication.
+ */
 
-    const headers: Record<string, string> = {
-      ...(init.headers as Record<string, string> || {}),
-    }
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`
-    }
+import { supabase } from "@/lib/supabase"
 
-    return fetch(url, { ...init, headers })
-  } catch {
-    return fetch(url, init)
+export async function apiFetch(
+  url: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  const {
+    data: { session },
+    error,
+  } = await supabase.auth.getSession()
+
+  if (error) {
+    throw new Error(
+      `Authentication error: ${error.message}`
+    )
   }
+
+  if (!session?.access_token) {
+    throw new Error(
+      "No active Supabase session. Please sign in again."
+    )
+  }
+
+  const headers = new Headers(init.headers)
+
+  headers.set(
+    "Authorization",
+    `Bearer ${session.access_token}`
+  )
+
+  return fetch(url, {
+    ...init,
+    headers,
+  })
 }
