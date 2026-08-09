@@ -1,0 +1,182 @@
+[
+  {
+    "question": "What MITRE ATT&CK technique uses PowerShell for execution?",
+    "expected_document_types": ["mitre_attack"],
+    "expected_keywords": ["PowerShell", "T1059.001"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "easy",
+    "category": "mitre"
+  },
+  {
+    "question": "What is the MITRE technique ID for command and scripting interpreter?",
+    "expected_document_types": ["mitre_attack"],
+    "expected_keywords": ["T1059", "Command", "Scripting"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "easy",
+    "category": "mitre"
+  },
+  {
+    "question": "Which MITRE technique involves credential dumping from LSASS?",
+    "expected_document_types": ["mitre_attack"],
+    "expected_keywords": ["T1003.001", "LSASS", "credential dumping"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "medium",
+    "category": "mitre"
+  },
+  {
+    "question": "What is CVE-2024-3094 and what software does it affect?",
+    "expected_document_types": ["cve"],
+    "expected_keywords": ["CVE-2024-3094", "xz", "backdoor"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "easy",
+    "category": "cve"
+  },
+  {
+    "question": "What is the CVSS score of CVE-2024-3094?",
+    "expected_document_types": ["cve"],
+    "expected_keywords": ["CVE-2024-3094", "CVSS", "10.0"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "easy",
+    "category": "cve"
+  },
+  {
+    "question": "Which CVEs affect OpenSSH and have a CVSS score above 7.0?",
+    "expected_document_types": ["cve"],
+    "expected_keywords": ["CVE", "OpenSSH", "CVSS"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "medium",
+    "category": "cve"
+  },
+  {
+    "question": "What was the root cause of the lateral movement incident?",
+    "expected_document_types": ["postmortem", "incident"],
+    "expected_keywords": ["lateral movement", "root cause"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "medium",
+    "category": "incident"
+  },
+  {
+    "question": "What remediation steps were taken after the ransomware outbreak?",
+    "expected_document_types": ["postmortem", "incident"],
+    "expected_keywords": ["ransomware", "remediation"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "medium",
+    "category": "incident"
+  },
+  {
+    "question": "Which postmortems involve privilege escalation as a factor?",
+    "expected_document_types": ["postmortem", "incident"],
+    "expected_keywords": ["privilege escalation", "postmortem"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "hard",
+    "category": "incident"
+  },
+  {
+    "question": "Which MITRE techniques were used in incidents involving CVE-2024-3094?",
+    "expected_document_types": ["mitre_attack", "cve", "incident"],
+    "expected_keywords": ["CVE-2024-3094", "technique", "T1059"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "hard",
+    "category": "cross_document"
+  },
+  {
+    "question": "What CVEs and MITRE techniques are associated with the SolarWinds supply chain attack?",
+    "expected_document_types": ["cve", "mitre_attack"],
+    "expected_keywords": ["SolarWinds", "supply chain", "T1195"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "hard",
+    "category": "cross_document"
+  },
+  {
+    "question": "Which incidents used the same technique as CVE-2021-44228 Log4Shell?",
+    "expected_document_types": ["cve", "incident", "mitre_attack"],
+    "expected_keywords": ["CVE-2021-44228", "Log4Shell", "T1190"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "hard",
+    "category": "cross_document"
+  },
+  {
+    "question": "T1059.001",
+    "expected_document_types": ["mitre_attack"],
+    "expected_keywords": ["T1059.001", "PowerShell"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "easy",
+    "category": "identifier"
+  },
+  {
+    "question": "CVE-2024-3094",
+    "expected_document_types": ["cve"],
+    "expected_keywords": ["CVE-2024-3094", "xz", "backdoor"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "easy",
+    "category": "identifier"
+  },
+  {
+    "question": "T1078",
+    "expected_document_types": ["mitre_attack"],
+    "expected_keywords": ["T1078", "Valid Accounts"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "easy",
+    "category": "identifier"
+  },
+  {
+    "question": "How does the defense evasion technique T1562 work?",
+    "expected_document_types": ["mitre_attack"],
+    "expected_keywords": ["T1562", "defense evasion", "Impair Defenses"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "medium",
+    "category": "mitre"
+  },
+  {
+    "question": "What are the common indicators of compromise for Cobalt Strike beacons?",
+    "expected_document_types": ["mitre_attack", "incident"],
+    "expected_keywords": ["Cobalt Strike", "beacon", "indicator"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "medium",
+    "category": "cross_document"
+  },
+  {
+    "question": "CVE-2023-44487",
+    "expected_document_types": ["cve"],
+    "expected_keywords": ["CVE-2023-44487", "HTTP/2", "Rapid Reset"],
+    "relevant_document_ids": [],
+    "relevant_chunk_ids": [],
+    "gold_labeled": false,
+    "difficulty": "easy",
+    "category": "identifier"
+  }
+]

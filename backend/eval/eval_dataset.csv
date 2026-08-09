@@ -1,0 +1,3 @@
+alert_summary,reasoning,retrieved_incidents,retrieved_cves,retrieved_mitre,ground_truth_reasoning
+Brute force SSH detected on srv-01,This matches incident INC-001 where brute force SSH was observed on srv-01 from the same IP range.,INC-001: Brute Force SSH||INC-002: Lateral Movement,CVE-2023-1234: SSH vulnerability||CVE-2023-5678: Weak auth,T1110: Brute Force||T1078: Valid Accounts,Ground truth: known pattern from INC-001
+DNS tunneling from endpoint-05,No similar incidents found in history. DNS payload analysis shows beaconing pattern not seen before.,,CVE-2024-1111: DNS exfil||CVE-2024-2222: Tunneling,T1071.004: DNS Tunneling,Ground truth: novel threat
