@@ -13,7 +13,7 @@ if (!API_BASE) {
 }
 
 export const api = {
-  async get(path: string): Promise<any> {
+  async get<T = any>(path: string): Promise<T> {
     const res = await apiFetch(
       `${API_BASE}${path}`,
       {
@@ -33,13 +33,13 @@ export const api = {
       )
     }
 
-    return res.json()
+    return res.json() as Promise<T>
   },
 
-  async post(
+  async post<T = any>(
     path: string,
     body: unknown
-  ): Promise<any> {
+  ): Promise<T> {
     const res = await apiFetch(
       `${API_BASE}${path}`,
       {
@@ -63,10 +63,10 @@ export const api = {
       )
     }
 
-    return res.json()
+    return res.json() as Promise<T>
   },
 
-  async delete(path: string): Promise<any> {
+  async delete<T = any>(path: string): Promise<T> {
     const res = await apiFetch(
       `${API_BASE}${path}`,
       {
@@ -86,7 +86,7 @@ export const api = {
       )
     }
 
-    return res.json()
+    return res.json() as Promise<T>
   },
 }
 
