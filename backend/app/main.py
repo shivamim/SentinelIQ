@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer
 
 from app.routers import auth, alerts, incidents, review_queue, audit, webhooks, reports, chat, documents
 from app.database import engine
@@ -19,12 +20,59 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
+# Configure OpenAPI security scheme for HTTP Bearer auth
+# This correctly represents that we expect a Supabase JWT in Authorization: Bearer header
+security_scheme = HTTPBearer(auto_error=False)
+
 app = FastAPI(
     title="SentinelIQ",
     description="Incident Correlation & Triage Copilot",
     version="1.0.0",
     lifespan=lifespan,
+    openapi_tags=[
+        {"name": "auth", "description": "Authentication endpoints"},
+        {"name": "alerts", "description": "Alert management"},
+        {"name": "incidents", "description": "Incident management"},
+        {"name": "review-queue", "description": "Review queue"},
+        {"name": "reports", "description": "Reports and dashboards"},
+        {"name": "chat", "description": "Chat interface"},
+        {"name": "documents", "description": "Document management"},
+        {"name": "audit", "description": "Audit trail"},
+        {"name": "webhooks", "description": "Webhook endpoints"},
+    ],
 )
+
+
+def custom_openapi():
+    """Customize OpenAPI schema to use HTTP Bearer auth."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    from fastapi.openapi.utils import get_openapi
+    
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        tags=app.openapi_tags,
+    )
+    
+    # Set up HTTP Bearer security scheme
+    openapi_schema["components"]["securitySchemes"] = {
+        "HTTPBearer": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "Enter your Supabase access token (JWT). Login is handled by Supabase Auth on the frontend.",
+        }
+    }
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 # CORS configuration from environment
 # When origins is "*" (wildcard), allow_credentials MUST be False per CORS spec
