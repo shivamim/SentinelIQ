@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { useRouter } from "next/navigation"
 import { api } from "@/lib/api"
 import { NavHeader } from "@/components/nav-header"
 
@@ -14,6 +15,8 @@ type Alert = {
 }
 
 export default function AlertsPage() {
+  const router = useRouter()
+
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -38,6 +41,14 @@ export default function AlertsPage() {
         setLoading(false)
       })
   }, [])
+
+  const openAttackReplay = (alertId: string) => {
+    // IMPORTANT:
+    // Pass the COMPLETE UUID, not alertId.slice(0, 8).
+    router.push(
+      `/attack-replay?alertId=${encodeURIComponent(alertId)}`
+    )
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -90,6 +101,10 @@ export default function AlertsPage() {
                   <th className="text-left py-2 px-3">
                     Time
                   </th>
+
+                  <th className="text-left py-2 px-3">
+                    Action
+                  </th>
                 </tr>
               </thead>
 
@@ -125,6 +140,17 @@ export default function AlertsPage() {
                             alert.created_at
                           ).toLocaleString()
                         : "N/A"}
+                    </td>
+
+                    <td className="py-2 px-3">
+                      <button
+                        onClick={() =>
+                          openAttackReplay(alert.id)
+                        }
+                        className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90"
+                      >
+                        Trace
+                      </button>
                     </td>
                   </tr>
                 ))}
