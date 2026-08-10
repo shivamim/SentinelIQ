@@ -82,7 +82,16 @@ class Neo4jService:
         """
         Execute a Cypher query and return JSON-friendly records.
 
-        Neo4j Record objects are converted to dictionaries.
+        IMPORTANT:
+        This method intentionally uses result.data().
+        Therefore callers should not assume that returned values
+        are Neo4j Node/Relationship objects.
+
+        Attack Replay queries explicitly request:
+            labels(node)
+            properties(node)
+            relationship type
+        instead of relying on Node object attributes.
         """
 
         driver = self._get_driver()
@@ -102,18 +111,6 @@ class Neo4jService:
     async def health_check(self) -> Dict[str, Any]:
         """
         Return Neo4j connection status and graph statistics.
-
-        Example:
-
-        {
-            "connected": true,
-            "database": "neo4j",
-            "version": "5.x",
-            "alert_count": 1,
-            "asset_count": 1,
-            "incident_count": 1,
-            "technique_count": 2
-        }
         """
 
         try:
@@ -213,21 +210,8 @@ class Neo4jService:
         alert_id: str,
     ) -> Dict[str, Any]:
         """
-        Synchronize one PostgreSQL alert and all of its
-        related entities into Neo4j.
-
-        PostgreSQL:
-            Alert
-              ├── Asset
-              └── CorrelationResult
-                    ├── Incident(s)
-                    └── MITRE Technique(s)
-
-        Neo4j:
-            Alert
-              ├── TARGETS -> Asset
-              ├── CORRELATES_TO -> Incident
-              └── USES_TECHNIQUE -> Technique
+        Synchronize one PostgreSQL alert and all related
+        entities into Neo4j.
         """
 
         # ------------------------------------------------------
@@ -304,9 +288,8 @@ class Neo4jService:
 
             if asset:
 
-                # IMPORTANT:
-                # PostgreSQL INET becomes IPv4Address / IPv6Address.
-                # Neo4j should receive a string instead.
+                # PostgreSQL INET can return IPv4Address /
+                # IPv6Address. Neo4j receives a string.
                 ip_value = (
                     str(asset.ip_address)
                     if asset.ip_address is not None
@@ -334,7 +317,7 @@ class Neo4jService:
                 synced["asset_linked"] = True
 
         # ------------------------------------------------------
-        # 5. Load CorrelationResult
+        # 5. Load latest CorrelationResult
         # ------------------------------------------------------
 
         corr_result = await db.execute(
@@ -348,7 +331,6 @@ class Neo4jService:
             )
         )
 
-        # We only need the newest correlation result.
         correlation = (
             corr_result.scalars().first()
         )
@@ -385,7 +367,8 @@ class Neo4jService:
                 )
 
                 incident = (
-                    incident_result.scalar_one_or_none()
+                    incident_result
+                    .scalar_one_or_none()
                 )
 
                 if not incident:
@@ -689,32 +672,30 @@ class Neo4jService:
         """
         Return a JSON-safe graph for Attack Replay.
 
-        Response:
+        IMPORTANT:
+        Do NOT return raw Neo4j Node objects from this method.
 
-        {
-            "alert_id": "...",
-            "nodes": [
-                {
-                    "id": "...",
-                    "type": "alert",
-                    "labels": ["Alert"],
-                    "properties": {...}
-                }
-            ],
-            "edges": [
-                {
-                    "id": "...",
-                    "source": "...",
-                    "target": "...",
-                    "relationship": "TARGETS",
-                    "type": "default"
-                }
-            ]
-        }
+        Every node is converted inside Cypher into:
+
+            {
+                "id": "...",
+                "labels": ["Alert"],
+                "properties": {...}
+            }
+
+        Every edge is converted into:
+
+            {
+                "id": "...",
+                "source": "...",
+                "target": "...",
+                "relationship": "TARGETS",
+                "type": "default"
+            }
         """
 
         # ------------------------------------------------------
-        # Normalize UUID
+        # 1. Normalize UUID
         # ------------------------------------------------------
 
         try:
@@ -728,17 +709,13 @@ class Neo4jService:
                 "alert_id": str(alert_id),
                 "nodes": [],
                 "edges": [],
-                "message": (
-                    "Invalid alert UUID."
-                ),
+                "message": "Invalid alert UUID.",
             }
 
-        normalized_alert_id = str(
-            alert_uuid
-        )
+        normalized_alert_id = str(alert_uuid)
 
         # ------------------------------------------------------
-        # Limit traversal depth
+        # 2. Limit traversal depth
         # ------------------------------------------------------
 
         try:
@@ -755,12 +732,23 @@ class Neo4jService:
         )
 
         # ------------------------------------------------------
-        # Check Alert node
+        # 3. Check Alert node
+        #
+        # IMPORTANT:
+        # We return scalar/map values instead of a Neo4j Node.
+        # This completely avoids:
+        #
+        #     'dict' object has no attribute 'labels'
+        #
         # ------------------------------------------------------
 
         check_query = """
         MATCH (start:Alert {id: $alert_id})
-        RETURN start
+
+        RETURN
+            start.id AS id,
+            labels(start) AS labels,
+            properties(start) AS properties
         """
 
         check_results = await self._run(
@@ -770,10 +758,7 @@ class Neo4jService:
             },
         )
 
-        if (
-            not check_results
-            or not check_results[0].get("start")
-        ):
+        if not check_results:
             return {
                 "alert_id": normalized_alert_id,
                 "nodes": [],
@@ -784,92 +769,47 @@ class Neo4jService:
                 ),
             }
 
-        # ------------------------------------------------------
-        # Find connected nodes
-        # ------------------------------------------------------
-
-        query = f"""
-        MATCH (start:Alert {{id: $alert_id}})
-
-        OPTIONAL MATCH path =
-            (start)-[*1..{max_depth}]-(related)
-
-        WITH
-            start,
-            collect(DISTINCT related) AS related_nodes
-
-        RETURN
-            start,
-            related_nodes
-        """
-
-        results = await self._run(
-            query,
-            {
-                "alert_id": normalized_alert_id,
-            },
-        )
-
-        if not results:
-            return {
-                "alert_id": normalized_alert_id,
-                "nodes": [],
-                "edges": [],
-                "message": (
-                    "Alert exists but no related "
-                    "Neo4j relationships were found."
-                ),
-            }
-
-        record = results[0]
-
-        start_node = record.get("start")
-
-        related_nodes = record.get(
-            "related_nodes",
-            [],
-        )
+        start_record = check_results[0]
 
         # ------------------------------------------------------
-        # Node serialization
+        # 4. Node serializer
+        #
+        # This now accepts dictionaries only.
+        # No .labels or .items() on Neo4j Node objects.
         # ------------------------------------------------------
 
-        node_map: Dict[
-            str,
-            Dict[str, Any],
-        ] = {}
-
-        def serialize_node(node):
-            """
-            Convert a Neo4j Node into the frontend format.
-            """
-
-            if node is None:
-                return None
-
-            properties = dict(
-                node.items()
-            )
-
-            # IMPORTANT:
-            # Do not convert missing ID into "None".
-            node_id = properties.get(
-                "id"
-            )
-
+        def serialize_node_record(
+            node_id,
+            labels,
+            properties,
+        ):
             if node_id is None:
                 return None
 
-            node_id = str(
-                node_id
-            )
+            node_id = str(node_id)
+
+            if labels is None:
+                labels = []
 
             labels = [
                 str(label)
-                for label in node.labels
+                for label in labels
             ]
 
-            # Determine frontend node type.
+            if properties is None:
+                properties = {}
+
+            # Make sure properties is a dictionary.
+            if not isinstance(properties, dict):
+                try:
+                    properties = dict(properties)
+                except Exception:
+                    properties = {}
+
+            # --------------------------------------------------
+            # Determine frontend node type
+            # --------------------------------------------------
+
             if "Alert" in labels:
                 node_type = "alert"
 
@@ -885,15 +825,16 @@ class Neo4jService:
             else:
                 node_type = "unknown"
 
-            # Make all property values JSON safe.
+            # --------------------------------------------------
+            # JSON-safe properties
+            # --------------------------------------------------
+
             safe_properties = {}
 
             for key, value in properties.items():
 
                 if value is None:
-                    safe_properties[
-                        key
-                    ] = None
+                    safe_properties[str(key)] = None
 
                 elif isinstance(
                     value,
@@ -904,14 +845,52 @@ class Neo4jService:
                         bool,
                     ),
                 ):
-                    safe_properties[
-                        key
-                    ] = value
+                    safe_properties[str(key)] = value
+
+                elif isinstance(value, list):
+                    safe_list = []
+
+                    for item in value:
+                        if item is None:
+                            safe_list.append(None)
+
+                        elif isinstance(
+                            item,
+                            (
+                                str,
+                                int,
+                                float,
+                                bool,
+                            ),
+                        ):
+                            safe_list.append(item)
+
+                        else:
+                            safe_list.append(str(item))
+
+                    safe_properties[str(key)] = safe_list
+
+                elif isinstance(value, dict):
+                    safe_properties[str(key)] = {
+                        str(k): (
+                            v
+                            if isinstance(
+                                v,
+                                (
+                                    str,
+                                    int,
+                                    float,
+                                    bool,
+                                ),
+                            )
+                            or v is None
+                            else str(v)
+                        )
+                        for k, v in value.items()
+                    }
 
                 else:
-                    safe_properties[
-                        key
-                    ] = str(value)
+                    safe_properties[str(key)] = str(value)
 
             return {
                 "id": node_id,
@@ -921,28 +900,59 @@ class Neo4jService:
             }
 
         # ------------------------------------------------------
-        # Add starting Alert
+        # 5. Initialize node map
         # ------------------------------------------------------
 
-        serialized_start = (
-            serialize_node(
-                start_node
-            )
+        node_map: Dict[
+            str,
+            Dict[str, Any],
+        ] = {}
+
+        start_node = serialize_node_record(
+            start_record.get("id"),
+            start_record.get("labels"),
+            start_record.get("properties"),
         )
 
-        if serialized_start:
+        if start_node:
             node_map[
-                serialized_start["id"]
-            ] = serialized_start
+                start_node["id"]
+            ] = start_node
 
         # ------------------------------------------------------
-        # Add connected nodes
+        # 6. Retrieve connected nodes
+        #
+        # Again, return scalar/map values rather than Neo4j
+        # Node objects.
         # ------------------------------------------------------
 
-        for node in related_nodes:
+        related_query = f"""
+        MATCH
+            (start:Alert {{id: $alert_id}})
+            -[*1..{max_depth}]-
+            (related)
 
-            serialized = (
-                serialize_node(node)
+        WITH DISTINCT related
+
+        RETURN
+            related.id AS id,
+            labels(related) AS labels,
+            properties(related) AS properties
+        """
+
+        related_results = await self._run(
+            related_query,
+            {
+                "alert_id": normalized_alert_id,
+            },
+        )
+
+        for row in related_results:
+
+            serialized = serialize_node_record(
+                row.get("id"),
+                row.get("labels"),
+                row.get("properties"),
             )
 
             if serialized:
@@ -951,9 +961,15 @@ class Neo4jService:
                 ] = serialized
 
         # ------------------------------------------------------
-        # Retrieve relationships separately.
+        # 7. Retrieve relationships
         #
-        # This avoids returning raw Neo4j Path objects.
+        # We explicitly return:
+        #
+        #   startNode(relationship).id
+        #   type(relationship)
+        #   endNode(relationship).id
+        #
+        # instead of returning Neo4j objects.
         # ------------------------------------------------------
 
         relationship_query = f"""
@@ -970,9 +986,15 @@ class Neo4jService:
             endNode(relationship) AS target
 
         RETURN
-            source,
+            source.id AS source_id,
+            labels(source) AS source_labels,
+            properties(source) AS source_properties,
+
             type(relationship) AS relationship_type,
-            target
+
+            target.id AS target_id,
+            labels(target) AS target_labels,
+            properties(target) AS target_properties
         """
 
         relationship_rows = await self._run(
@@ -983,7 +1005,7 @@ class Neo4jService:
         )
 
         # ------------------------------------------------------
-        # Serialize edges
+        # 8. Serialize edges
         # ------------------------------------------------------
 
         edges: List[
@@ -994,12 +1016,12 @@ class Neo4jService:
 
         for row in relationship_rows:
 
-            source = row.get(
-                "source"
+            source_id = row.get(
+                "source_id"
             )
 
-            target = row.get(
-                "target"
+            target_id = row.get(
+                "target_id"
             )
 
             relationship_type = row.get(
@@ -1007,38 +1029,32 @@ class Neo4jService:
             )
 
             if (
-                source is None
-                or target is None
+                source_id is None
+                or target_id is None
                 or relationship_type is None
             ):
                 continue
 
-            source_data = (
-                serialize_node(
-                    source
-                )
+            source_node = serialize_node_record(
+                source_id,
+                row.get("source_labels"),
+                row.get("source_properties"),
             )
 
-            target_data = (
-                serialize_node(
-                    target
-                )
+            target_node = serialize_node_record(
+                target_id,
+                row.get("target_labels"),
+                row.get("target_properties"),
             )
 
             if (
-                not source_data
-                or not target_data
+                not source_node
+                or not target_node
             ):
                 continue
 
-            source_id = source_data[
-                "id"
-            ]
-
-            target_id = target_data[
-                "id"
-            ]
-
+            source_id = source_node["id"]
+            target_id = target_node["id"]
             relationship_type = str(
                 relationship_type
             )
@@ -1046,11 +1062,11 @@ class Neo4jService:
             # Ensure both nodes exist.
             node_map[
                 source_id
-            ] = source_data
+            ] = source_node
 
             node_map[
                 target_id
-            ] = target_data
+            ] = target_node
 
             # Prevent duplicate edges.
             edge_key = (
@@ -1062,9 +1078,7 @@ class Neo4jService:
             if edge_key in edge_seen:
                 continue
 
-            edge_seen.add(
-                edge_key
-            )
+            edge_seen.add(edge_key)
 
             edges.append(
                 {
@@ -1075,15 +1089,13 @@ class Neo4jService:
                     ),
                     "source": source_id,
                     "target": target_id,
-                    "relationship": (
-                        relationship_type
-                    ),
+                    "relationship": relationship_type,
                     "type": "default",
                 }
             )
 
         # ------------------------------------------------------
-        # Final response
+        # 9. Final response
         # ------------------------------------------------------
 
         response = {
@@ -1122,9 +1134,11 @@ class Neo4jService:
             alert_uuid = UUID(
                 str(alert_id)
             )
+
             normalized_alert_id = str(
                 alert_uuid
             )
+
         except (
             ValueError,
             TypeError,
@@ -1132,12 +1146,17 @@ class Neo4jService:
         ):
             return []
 
+        try:
+            max_depth = int(max_depth)
+        except (
+            ValueError,
+            TypeError,
+        ):
+            max_depth = 3
+
         max_depth = max(
             1,
-            min(
-                int(max_depth),
-                5,
-            ),
+            min(max_depth, 5),
         )
 
         results = await self._run(
@@ -1166,9 +1185,11 @@ class Neo4jService:
             asset_uuid = UUID(
                 str(asset_id)
             )
+
             normalized_asset_id = str(
                 asset_uuid
             )
+
         except (
             ValueError,
             TypeError,
@@ -1221,9 +1242,11 @@ class Neo4jService:
             asset_uuid = UUID(
                 str(asset_id)
             )
+
             normalized_asset_id = str(
                 asset_uuid
             )
+
         except (
             ValueError,
             TypeError,
@@ -1273,9 +1296,11 @@ class Neo4jService:
             asset_uuid = UUID(
                 str(asset_id)
             )
+
             normalized_asset_id = str(
                 asset_uuid
             )
+
         except (
             ValueError,
             TypeError,
