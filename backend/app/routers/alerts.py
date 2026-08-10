@@ -175,7 +175,7 @@ async def ingest_alert(
 
 
 # ============================================================
-# ATTACK REPLAY — NEO4J
+# ATTACK REPLAY — NEO4J WITH SYNC-ON-DEMAND
 # ============================================================
 
 @router.get(
@@ -183,6 +183,7 @@ async def ingest_alert(
 )
 async def get_attack_replay(
     alert_id: str,
+    db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """
@@ -190,15 +191,62 @@ async def get_attack_replay(
 
     The response contains JSON-safe nodes and edges
     suitable for React Flow.
+
+    If the alert node does not exist in Neo4j, this endpoint
+    will first synchronize it from PostgreSQL before querying
+    the graph.
     """
 
     try:
+        # First, check if the alert exists in PostgreSQL
+        result = await db.execute(
+            select(Alert).where(Alert.id == alert_id)
+        )
+        alert = result.scalar_one_or_none()
+
+        if not alert:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Alert not found: {alert_id}",
+            )
+
+        # Check if alert exists in Neo4j
+        check_result = await neo4j_service._run(
+            "MATCH (a:Alert {id: $alert_id}) RETURN a",
+            {"alert_id": alert_id},
+        )
+
+        # If alert doesn't exist in Neo4j, sync it from PostgreSQL
+        if not check_result:
+            sync_result = await neo4j_service.sync_alert_from_postgres(
+                db=db,
+                alert_id=alert_id,
+            )
+
+            if not sync_result.get("success"):
+                # Sync failed but alert exists in PostgreSQL
+                # Return empty graph with informative message
+                return {
+                    "alert_id": alert_id,
+                    "nodes": [],
+                    "edges": [],
+                    "message": (
+                        "Alert exists in PostgreSQL but could not be "
+                        "synchronized to Neo4j. "
+                        f"Reason: {sync_result.get('error', 'Unknown error')}"
+                    ),
+                }
+
+        # Now query the graph
         graph = await neo4j_service.get_attack_replay_graph(
             alert_id=alert_id,
             max_depth=3,
         )
 
         return graph
+
+    except HTTPException:
+        raise
 
     except RuntimeError as exc:
         raise HTTPException(

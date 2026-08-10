@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth, alerts, incidents, review_queue, audit, webhooks, reports, chat, documents
 from app.database import engine
 from app.config import get_settings
+from app.services.neo4j_service import neo4j_service
 
 settings = get_settings()
 
@@ -17,6 +18,7 @@ async def lifespan(app: FastAPI):
     settings.validate_production()
     yield
     await engine.dispose()
+    await neo4j_service.close()
 
 
 app = FastAPI(
@@ -54,3 +56,26 @@ app.include_router(documents.router)
 @app.get("/health")
 async def health():
     return {"status": "ok", "app": "SentinelIQ"}
+
+
+@app.get("/health/neo4j")
+async def health_neo4j():
+    """
+    Neo4j health check endpoint.
+    
+    Returns connection status and node counts:
+    - connected: bool
+    - database: str
+    - alert_count: int
+    - asset_count: int
+    - incident_count: int
+    - technique_count: int
+    """
+    try:
+        health_info = await neo4j_service.health_check()
+        return health_info
+    except Exception as e:
+        return {
+            "connected": False,
+            "error": str(e)
+        }

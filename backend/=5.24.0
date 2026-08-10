@@ -1,0 +1,10 @@
+Collecting neo4j
+  Downloading neo4j-6.2.0-py3-none-any.whl.metadata (5.3 kB)
+Requirement already satisfied: pytz in /usr/local/lib/python3.12/site-packages (from neo4j) (2025.2)
+Downloading neo4j-6.2.0-py3-none-any.whl (327 kB)
+Installing collected packages: neo4j
+Successfully installed neo4j-6.2.0
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip

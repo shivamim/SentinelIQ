@@ -1,8 +1,11 @@
 """Neo4j knowledge graph service for SentinelIQ."""
 
 from typing import List, Dict, Any, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.config import get_settings
+from app.models import Alert, Asset, Incident, CorrelationResult
 
 
 settings = get_settings()
@@ -75,6 +78,202 @@ class Neo4jService:
             )
 
             return await result.data()
+
+    # ==========================================================
+    # HEALTH / DEBUG
+    # ==========================================================
+
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Return Neo4j connection status and node counts.
+        
+        Returns:
+            {
+                "connected": bool,
+                "database": str,
+                "alert_count": int,
+                "asset_count": int,
+                "incident_count": int,
+                "technique_count": int
+            }
+        """
+        try:
+            driver = self._get_driver()
+            
+            # Test connection and get database info
+            async with driver.session() as session:
+                result = await session.run("CALL dbms.components() YIELD name, versions RETURN name, versions[0] AS version")
+                record = await result.single()
+                
+                if not record:
+                    return {
+                        "connected": False,
+                        "error": "No response from Neo4j"
+                    }
+                
+                database_info = {
+                    "connected": True,
+                    "database": record.get("name", "unknown"),
+                    "version": record.get("version", "unknown")
+                }
+            
+            # Get node counts
+            alert_result = await self._run("MATCH (a:Alert) RETURN count(a) AS count")
+            asset_result = await self._run("MATCH (a:Asset) RETURN count(a) AS count")
+            incident_result = await self._run("MATCH (i:Incident) RETURN count(i) AS count")
+            technique_result = await self._run("MATCH (t:Technique) RETURN count(t) AS count")
+            
+            database_info["alert_count"] = alert_result[0]["count"] if alert_result else 0
+            database_info["asset_count"] = asset_result[0]["count"] if asset_result else 0
+            database_info["incident_count"] = incident_result[0]["count"] if incident_result else 0
+            database_info["technique_count"] = technique_result[0]["count"] if technique_result else 0
+            
+            return database_info
+            
+        except Exception as e:
+            return {
+                "connected": False,
+                "error": str(e)
+            }
+
+    # ==========================================================
+    # SYNCHRONIZATION FROM POSTGRESQL
+    # ==========================================================
+
+    async def sync_alert_from_postgres(
+        self,
+        db: AsyncSession,
+        alert_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Synchronize an alert from PostgreSQL to Neo4j along with
+        all related entities (Asset, Incident, Technique).
+        
+        This ensures the graph is populated on-demand when querying
+        for attack replay.
+        
+        Args:
+            db: PostgreSQL async session
+            alert_id: Full UUID string of the alert
+            
+        Returns:
+            Dict with sync status and counts
+        """
+        from uuid import UUID
+        
+        # Validate UUID format
+        try:
+            uuid_obj = UUID(alert_id)
+        except ValueError:
+            return {
+                "success": False,
+                "error": f"Invalid alert ID format: {alert_id}"
+            }
+        
+        # Load alert from PostgreSQL
+        result = await db.execute(
+            select(Alert).where(Alert.id == uuid_obj)
+        )
+        alert = result.scalar_one_or_none()
+        
+        if not alert:
+            return {
+                "success": False,
+                "error": f"Alert not found in PostgreSQL: {alert_id}"
+            }
+        
+        # Create/update Alert node in Neo4j
+        await self.create_alert_node(
+            alert_id=str(alert.id),
+            alert_type=alert.alert_type or "unknown",
+            severity=alert.severity or "unknown"
+        )
+        
+        synced = {
+            "alert_created": True,
+            "asset_linked": False,
+            "incidents_linked": 0,
+            "techniques_linked": 0
+        }
+        
+        # Link to Asset if present
+        if alert.asset_id:
+            asset_result = await db.execute(
+                select(Asset).where(Asset.id == alert.asset_id)
+            )
+            asset = asset_result.scalar_one_or_none()
+            
+            if asset:
+                await self.create_asset_node(
+                    asset_id=str(asset.id),
+                    hostname=asset.hostname or "unknown",
+                    ip=asset.ip_address or "unknown",
+                    criticality=asset.criticality or "unknown"
+                )
+                
+                await self.link_alert_to_asset(
+                    alert_id=str(alert.id),
+                    asset_id=str(asset.id)
+                )
+                
+                synced["asset_linked"] = True
+        
+        # Load correlation result to get incidents and techniques
+        corr_result = await db.execute(
+            select(CorrelationResult).where(
+                CorrelationResult.alert_id == uuid_obj
+            )
+        )
+        correlation = corr_result.scalar_one_or_none()
+        
+        if correlation:
+            # Link to Incidents
+            matched_incidents = correlation.matched_incident_ids or []
+            
+            for incident_uuid in matched_incidents:
+                incident_result = await db.execute(
+                    select(Incident).where(Incident.id == incident_uuid)
+                )
+                incident = incident_result.scalar_one_or_none()
+                
+                if incident:
+                    await self.create_incident_node(
+                        incident_id=str(incident.id),
+                        title=incident.title or "unknown",
+                        severity=incident.severity or "unknown"
+                    )
+                    
+                    await self.link_alert_to_incident(
+                        alert_id=str(alert.id),
+                        incident_id=str(incident.id)
+                    )
+                    
+                    synced["incidents_linked"] += 1
+            
+            # Link to MITRE Techniques
+            matched_techniques = correlation.matched_mitre_techniques or []
+            
+            for technique_id in matched_techniques:
+                # Extract technique name from ID if possible (e.g., T1110 -> Brute Force)
+                technique_name = f"Technique {technique_id}"
+                
+                await self.create_technique_node(
+                    technique_id=technique_id,
+                    name=technique_name
+                )
+                
+                await self.link_alert_to_technique(
+                    alert_id=str(alert.id),
+                    technique_id=technique_id
+                )
+                
+                synced["techniques_linked"] += 1
+        
+        return {
+            "success": True,
+            "alert_id": str(alert.id),
+            **synced
+        }
 
     # ==========================================================
     # NODE CREATION
@@ -280,11 +479,17 @@ class Neo4jService:
         """
         Return a JSON-safe graph for Attack Replay.
 
+        First checks if the Alert node exists in Neo4j.
+        If not, returns an honest response indicating the graph
+        needs to be populated.
+
         The response contains:
 
             {
+                "alert_id": "...",
                 "nodes": [...],
-                "edges": [...]
+                "edges": [...],
+                "message": "..." (optional)
             }
 
         This is intentionally converted here instead of returning
@@ -296,6 +501,34 @@ class Neo4jService:
 
         if max_depth > 5:
             max_depth = 5
+
+        # ------------------------------------------------------
+        # First, check if the Alert node exists
+        # ------------------------------------------------------
+
+        check_query = """
+        MATCH (start:Alert {id: $alert_id})
+        RETURN start
+        """
+
+        check_results = await self._run(
+            check_query,
+            {
+                "alert_id": alert_id,
+            },
+        )
+
+        if not check_results or not check_results[0].get("start"):
+            # Alert node does not exist in Neo4j
+            return {
+                "alert_id": alert_id,
+                "nodes": [],
+                "edges": [],
+                "message": (
+                    "Alert node not found in Neo4j. "
+                    "The graph may need to be synchronized from PostgreSQL."
+                )
+            }
 
         # ------------------------------------------------------
         # Find the alert and all connected graph entities.
@@ -328,9 +561,10 @@ class Neo4jService:
 
         if not results:
             return {
+                "alert_id": alert_id,
                 "nodes": [],
                 "edges": [],
-                "alert_id": alert_id,
+                "message": "Alert exists but no related Neo4j relationships were found."
             }
 
         record = results[0]
@@ -510,13 +744,21 @@ class Neo4jService:
                 }
             )
 
-        return {
+        response = {
             "alert_id": alert_id,
             "nodes": list(
                 node_map.values()
             ),
             "edges": edges,
         }
+
+        # Add message if no relationships found
+        if not edges:
+            response["message"] = (
+                "Alert exists but no related Neo4j relationships were found."
+            )
+
+        return response
 
     # ==========================================================
     # EXISTING GRAPH QUERIES
