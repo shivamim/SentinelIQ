@@ -261,6 +261,63 @@ class ChatResponse(BaseModel):
 
 
 # ============================================================
+# Attack Replay Graph
+# ============================================================
+
+class GraphNodeProperty(BaseModel):
+    """Individual property of a graph node."""
+    id: str
+    alert_type: Optional[str] = None
+    severity: Optional[str] = None
+    hostname: Optional[str] = None
+    ip: Optional[str] = None
+    criticality: Optional[str] = None
+    title: Optional[str] = None
+    name: Optional[str] = None
+
+
+class GraphNode(BaseModel):
+    """A node in the attack replay graph."""
+    id: str
+    type: str  # alert, asset, incident, technique
+    labels: List[str]
+    properties: dict
+
+
+class GraphEdge(BaseModel):
+    """An edge (relationship) in the attack replay graph."""
+    id: str
+    source: str
+    target: str
+    relationship: str
+    type: str = "default"
+
+
+class AttackReplayGraph(BaseModel):
+    """Response model for attack replay graph endpoint."""
+    alert_id: str
+    nodes: List[GraphNode]
+    edges: List[GraphEdge]
+    message: Optional[str] = None
+
+
+# ============================================================
+# Neo4j Health
+# ============================================================
+
+class Neo4jHealthResponse(BaseModel):
+    """Response model for Neo4j health check endpoint."""
+    connected: bool
+    database: Optional[str] = None
+    version: Optional[str] = None
+    alert_count: Optional[int] = None
+    asset_count: Optional[int] = None
+    incident_count: Optional[int] = None
+    technique_count: Optional[int] = None
+    error: Optional[str] = None
+
+
+# ============================================================
 # Documents
 # ============================================================
 
