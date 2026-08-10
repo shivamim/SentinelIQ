@@ -1,11 +1,16 @@
 """Pydantic schemas for request/response validation."""
+
 from typing import Literal, Optional, List
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, Field
 from uuid import UUID
 
+from pydantic import BaseModel, EmailStr, Field, IPvAnyAddress
 
-# ---------- Auth ----------
+
+# ============================================================
+# Auth
+# ============================================================
+
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -27,28 +32,37 @@ class UserOut(BaseModel):
         from_attributes = True
 
 
-# ---------- Assets ----------
+# ============================================================
+# Assets
+# ============================================================
+
 class AssetOut(BaseModel):
     id: UUID
     hostname: str
-    ip_address: Optional[str]
-    asset_type: Optional[str]
-    criticality: Optional[str]
-    owner_team: Optional[str]
-    environment: Optional[str]
+    ip_address: Optional[str] = None
+    asset_type: Optional[str] = None
+    criticality: Optional[str] = None
+    owner_team: Optional[str] = None
+    environment: Optional[str] = None
 
     class Config:
         from_attributes = True
 
 
-# ---------- Alerts ----------
+# ============================================================
+# Alerts
+# ============================================================
+
 class AlertIngest(BaseModel):
     source: str
     raw_alert: dict
     asset_id: Optional[UUID] = None
     alert_type: Optional[str] = None
     severity: Optional[str] = None
-    ioc_ip: Optional[str] = None
+
+    # PostgreSQL INET -> IPv4Address / IPv6Address
+    ioc_ip: Optional[IPvAnyAddress] = None
+
     ioc_domain: Optional[str] = None
     ioc_hash: Optional[str] = None
 
@@ -57,12 +71,16 @@ class AlertOut(BaseModel):
     id: UUID
     source: str
     raw_alert: dict
-    asset_id: Optional[UUID]
-    alert_type: Optional[str]
-    severity: Optional[str]
-    ioc_ip: Optional[str]
-    ioc_domain: Optional[str]
-    ioc_hash: Optional[str]
+    asset_id: Optional[UUID] = None
+    alert_type: Optional[str] = None
+    severity: Optional[str] = None
+
+    # PostgreSQL INET returns an IP address object.
+    # IPvAnyAddress allows both IPv4 and IPv6.
+    ioc_ip: Optional[IPvAnyAddress] = None
+
+    ioc_domain: Optional[str] = None
+    ioc_hash: Optional[str] = None
     status: str
     created_at: datetime
 
@@ -70,7 +88,10 @@ class AlertOut(BaseModel):
         from_attributes = True
 
 
-# ---------- Incidents ----------
+# ============================================================
+# Incidents
+# ============================================================
+
 class IncidentCreate(BaseModel):
     title: str
     description: Optional[str] = None
@@ -81,16 +102,20 @@ class IncidentCreate(BaseModel):
 class IncidentOut(BaseModel):
     id: UUID
     title: str
-    description: Optional[str]
-    severity: Optional[str]
+    description: Optional[str] = None
+    severity: Optional[str] = None
     status: str
     opened_at: datetime
-    closed_at: Optional[datetime]
-    assigned_to: Optional[UUID]
+    closed_at: Optional[datetime] = None
+    assigned_to: Optional[UUID] = None
 
     class Config:
         from_attributes = True
 
+
+# ============================================================
+# Postmortems
+# ============================================================
 
 class PostmortemCreate(BaseModel):
     summary: str
@@ -103,26 +128,31 @@ class PostmortemOut(BaseModel):
     id: UUID
     incident_id: UUID
     summary: str
-    root_cause: Optional[str]
-    remediation: Optional[str]
-    tags: Optional[List[str]]
+    root_cause: Optional[str] = None
+    remediation: Optional[str] = None
+    tags: Optional[List[str]] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
 
 
-# ---------- Correlation ----------
+# ============================================================
+# Correlation
+# ============================================================
+
 class CorrelationResultOut(BaseModel):
     id: UUID
     alert_id: UUID
-    matched_incident_ids: Optional[List[UUID]]
-    matched_cve_ids: Optional[List[str]]
-    matched_mitre_techniques: Optional[List[str]]
-    reasoning_text: Optional[str]
-    confidence_score: Optional[float]
-    verdict: Optional[Literal["known_pattern", "novel", "uncertain"]]
-    grounding_passed: Optional[bool]
+    matched_incident_ids: Optional[List[UUID]] = None
+    matched_cve_ids: Optional[List[str]] = None
+    matched_mitre_techniques: Optional[List[str]] = None
+    reasoning_text: Optional[str] = None
+    confidence_score: Optional[float] = None
+    verdict: Optional[
+        Literal["known_pattern", "novel", "uncertain"]
+    ] = None
+    grounding_passed: Optional[bool] = None
     retry_count: int
     created_at: datetime
 
@@ -130,14 +160,17 @@ class CorrelationResultOut(BaseModel):
         from_attributes = True
 
 
-# ---------- Review Queue ----------
+# ============================================================
+# Review Queue
+# ============================================================
+
 class ReviewQueueItem(BaseModel):
     alert_id: UUID
-    alert_type: Optional[str]
-    severity: Optional[str]
-    verdict: Optional[str]
-    confidence_score: Optional[float]
-    reasoning_text: Optional[str]
+    alert_type: Optional[str] = None
+    severity: Optional[str] = None
+    verdict: Optional[str] = None
+    confidence_score: Optional[float] = None
+    reasoning_text: Optional[str] = None
     created_at: datetime
 
 
@@ -146,14 +179,20 @@ class ReviewResolve(BaseModel):
     reasoning_override: Optional[str] = None
 
 
-# ---------- Audit ----------
+# ============================================================
+# Audit
+# ============================================================
+
 class AuditLogOut(BaseModel):
     id: UUID
     actor: str
     action: str
-    entity_type: Optional[str]
-    entity_id: Optional[UUID]
-    metadata_json: Optional[dict] = Field(None, alias="metadata")
+    entity_type: Optional[str] = None
+    entity_id: Optional[UUID] = None
+    metadata_json: Optional[dict] = Field(
+        default=None,
+        alias="metadata",
+    )
     created_at: datetime
 
     class Config:
@@ -161,7 +200,10 @@ class AuditLogOut(BaseModel):
         populate_by_name = True
 
 
-# ---------- Parsers ----------
+# ============================================================
+# Parsers
+# ============================================================
+
 class ParsedAlerts(BaseModel):
     source: str
     alerts: List[dict]
@@ -169,14 +211,20 @@ class ParsedAlerts(BaseModel):
     count: int
 
 
-# ---------- Webhooks ----------
+# ============================================================
+# Webhooks
+# ============================================================
+
 class WebhookPayload(BaseModel):
     connector_id: Optional[str] = None
     event_type: str = "alert"
     payload: dict
 
 
-# ---------- Chat / RAG ----------
+# ============================================================
+# Chat / RAG
+# ============================================================
+
 class ChatRequest(BaseModel):
     query: str
     conversation_id: Optional[str] = None
@@ -212,14 +260,20 @@ class ChatResponse(BaseModel):
     conversation_id: str
 
 
-# ---------- Documents ----------
+# ============================================================
+# Documents
+# ============================================================
+
 class DocumentIngest(BaseModel):
     title: str
     source: str
     source_url: Optional[str] = None
-    document_type: str  # mitre_attack, cve, incident, postmortem, markdown, json
+    document_type: str
     content: str
-    metadata_json: Optional[dict] = Field(None, alias="metadata")
+    metadata_json: Optional[dict] = Field(
+        default=None,
+        alias="metadata",
+    )
 
     class Config:
         populate_by_name = True
@@ -230,7 +284,10 @@ class DocumentChunkOut(BaseModel):
     document_id: UUID
     chunk_index: int
     chunk_text: str
-    metadata_json: Optional[dict] = Field(None, alias="metadata")
+    metadata_json: Optional[dict] = Field(
+        default=None,
+        alias="metadata",
+    )
     created_at: datetime
 
     class Config:
@@ -242,12 +299,15 @@ class DocumentOut(BaseModel):
     id: UUID
     title: str
     source: str
-    source_url: Optional[str]
+    source_url: Optional[str] = None
     document_type: str
     content: str
-    metadata_json: Optional[dict] = Field(None, alias="metadata")
+    metadata_json: Optional[dict] = Field(
+        default=None,
+        alias="metadata",
+    )
     created_at: datetime
-    updated_at: Optional[datetime]
+    updated_at: Optional[datetime] = None
     chunks: Optional[List[DocumentChunkOut]] = None
 
     class Config:
