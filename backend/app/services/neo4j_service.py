@@ -1,11 +1,18 @@
 """Neo4j knowledge graph service for SentinelIQ."""
 
 from typing import List, Dict, Any, Optional
+from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.models import Alert, Asset, Incident, CorrelationResult
+from app.models import (
+    Alert,
+    Asset,
+    Incident,
+    CorrelationResult,
+)
 
 
 settings = get_settings()
@@ -34,6 +41,8 @@ class Neo4jService:
     # ==========================================================
 
     def _get_driver(self):
+        """Create and cache the Neo4j async driver."""
+
         if self._driver is not None:
             return self._driver
 
@@ -59,6 +68,8 @@ class Neo4jService:
         return self._driver
 
     async def close(self):
+        """Close the Neo4j driver."""
+
         if self._driver:
             await self._driver.close()
             self._driver = None
@@ -68,6 +79,11 @@ class Neo4jService:
         query: str,
         params: Optional[dict] = None,
     ) -> List[dict]:
+        """
+        Execute a Cypher query and return JSON-friendly records.
+
+        Neo4j Record objects are converted to dictionaries.
+        """
 
         driver = self._get_driver()
 
@@ -85,55 +101,106 @@ class Neo4jService:
 
     async def health_check(self) -> Dict[str, Any]:
         """
-        Return Neo4j connection status and node counts.
-        
-        Returns:
-            {
-                "connected": bool,
-                "database": str,
-                "alert_count": int,
-                "asset_count": int,
-                "incident_count": int,
-                "technique_count": int
-            }
+        Return Neo4j connection status and graph statistics.
+
+        Example:
+
+        {
+            "connected": true,
+            "database": "neo4j",
+            "version": "5.x",
+            "alert_count": 1,
+            "asset_count": 1,
+            "incident_count": 1,
+            "technique_count": 2
+        }
         """
+
         try:
             driver = self._get_driver()
-            
-            # Test connection and get database info
+
+            # --------------------------------------------------
+            # Test connection
+            # --------------------------------------------------
+
             async with driver.session() as session:
-                result = await session.run("CALL dbms.components() YIELD name, versions RETURN name, versions[0] AS version")
+                result = await session.run(
+                    """
+                    RETURN
+                        1 AS ok
+                    """
+                )
+
                 record = await result.single()
-                
+
                 if not record:
                     return {
                         "connected": False,
-                        "error": "No response from Neo4j"
+                        "error": "Neo4j returned no response.",
                     }
-                
-                database_info = {
-                    "connected": True,
-                    "database": record.get("name", "unknown"),
-                    "version": record.get("version", "unknown")
-                }
-            
-            # Get node counts
-            alert_result = await self._run("MATCH (a:Alert) RETURN count(a) AS count")
-            asset_result = await self._run("MATCH (a:Asset) RETURN count(a) AS count")
-            incident_result = await self._run("MATCH (i:Incident) RETURN count(i) AS count")
-            technique_result = await self._run("MATCH (t:Technique) RETURN count(t) AS count")
-            
-            database_info["alert_count"] = alert_result[0]["count"] if alert_result else 0
-            database_info["asset_count"] = asset_result[0]["count"] if asset_result else 0
-            database_info["incident_count"] = incident_result[0]["count"] if incident_result else 0
-            database_info["technique_count"] = technique_result[0]["count"] if technique_result else 0
-            
-            return database_info
-            
-        except Exception as e:
+
+            # --------------------------------------------------
+            # Count nodes
+            # --------------------------------------------------
+
+            alert_result = await self._run(
+                """
+                MATCH (a:Alert)
+                RETURN count(a) AS count
+                """
+            )
+
+            asset_result = await self._run(
+                """
+                MATCH (a:Asset)
+                RETURN count(a) AS count
+                """
+            )
+
+            incident_result = await self._run(
+                """
+                MATCH (i:Incident)
+                RETURN count(i) AS count
+                """
+            )
+
+            technique_result = await self._run(
+                """
+                MATCH (t:Technique)
+                RETURN count(t) AS count
+                """
+            )
+
+            return {
+                "connected": True,
+                "database": "neo4j",
+                "version": "5.x",
+                "alert_count": (
+                    alert_result[0]["count"]
+                    if alert_result
+                    else 0
+                ),
+                "asset_count": (
+                    asset_result[0]["count"]
+                    if asset_result
+                    else 0
+                ),
+                "incident_count": (
+                    incident_result[0]["count"]
+                    if incident_result
+                    else 0
+                ),
+                "technique_count": (
+                    technique_result[0]["count"]
+                    if technique_result
+                    else 0
+                ),
+            }
+
+        except Exception as exc:
             return {
                 "connected": False,
-                "error": str(e)
+                "error": str(exc),
             }
 
     # ==========================================================
@@ -146,138 +213,284 @@ class Neo4jService:
         alert_id: str,
     ) -> Dict[str, Any]:
         """
-        Synchronize an alert from PostgreSQL to Neo4j along with
-        all related entities (Asset, Incident, Technique).
-        
-        This ensures the graph is populated on-demand when querying
-        for attack replay.
-        
-        Args:
-            db: PostgreSQL async session
-            alert_id: Full UUID string of the alert
-            
-        Returns:
-            Dict with sync status and counts
+        Synchronize one PostgreSQL alert and all of its
+        related entities into Neo4j.
+
+        PostgreSQL:
+            Alert
+              ├── Asset
+              └── CorrelationResult
+                    ├── Incident(s)
+                    └── MITRE Technique(s)
+
+        Neo4j:
+            Alert
+              ├── TARGETS -> Asset
+              ├── CORRELATES_TO -> Incident
+              └── USES_TECHNIQUE -> Technique
         """
-        from uuid import UUID
-        
-        # Validate UUID format
+
+        # ------------------------------------------------------
+        # 1. Validate UUID
+        # ------------------------------------------------------
+
         try:
-            uuid_obj = UUID(alert_id)
-        except ValueError:
+            uuid_obj = UUID(str(alert_id))
+        except (ValueError, TypeError, AttributeError):
             return {
                 "success": False,
-                "error": f"Invalid alert ID format: {alert_id}"
+                "error": f"Invalid alert UUID: {alert_id}",
             }
-        
-        # Load alert from PostgreSQL
+
+        normalized_alert_id = str(uuid_obj)
+
+        # ------------------------------------------------------
+        # 2. Load Alert from PostgreSQL
+        # ------------------------------------------------------
+
         result = await db.execute(
-            select(Alert).where(Alert.id == uuid_obj)
+            select(Alert).where(
+                Alert.id == uuid_obj
+            )
         )
+
         alert = result.scalar_one_or_none()
-        
+
         if not alert:
             return {
                 "success": False,
-                "error": f"Alert not found in PostgreSQL: {alert_id}"
+                "error": (
+                    "Alert not found in PostgreSQL: "
+                    f"{normalized_alert_id}"
+                ),
             }
-        
-        # Create/update Alert node in Neo4j
+
+        # ------------------------------------------------------
+        # 3. Create / update Alert node
+        # ------------------------------------------------------
+
         await self.create_alert_node(
-            alert_id=str(alert.id),
-            alert_type=alert.alert_type or "unknown",
-            severity=alert.severity or "unknown"
+            alert_id=normalized_alert_id,
+            alert_type=str(
+                alert.alert_type
+                or "unknown"
+            ),
+            severity=str(
+                alert.severity
+                or "unknown"
+            ),
         )
-        
+
         synced = {
             "alert_created": True,
             "asset_linked": False,
             "incidents_linked": 0,
-            "techniques_linked": 0
+            "techniques_linked": 0,
         }
-        
-        # Link to Asset if present
+
+        # ------------------------------------------------------
+        # 4. Synchronize Asset
+        # ------------------------------------------------------
+
         if alert.asset_id:
+
             asset_result = await db.execute(
-                select(Asset).where(Asset.id == alert.asset_id)
+                select(Asset).where(
+                    Asset.id == alert.asset_id
+                )
             )
+
             asset = asset_result.scalar_one_or_none()
-            
+
             if asset:
+
+                # IMPORTANT:
+                # PostgreSQL INET becomes IPv4Address / IPv6Address.
+                # Neo4j should receive a string instead.
+                ip_value = (
+                    str(asset.ip_address)
+                    if asset.ip_address is not None
+                    else "unknown"
+                )
+
                 await self.create_asset_node(
                     asset_id=str(asset.id),
-                    hostname=asset.hostname or "unknown",
-                    ip=asset.ip_address or "unknown",
-                    criticality=asset.criticality or "unknown"
+                    hostname=str(
+                        asset.hostname
+                        or "unknown"
+                    ),
+                    ip=ip_value,
+                    criticality=str(
+                        asset.criticality
+                        or "unknown"
+                    ),
                 )
-                
+
                 await self.link_alert_to_asset(
-                    alert_id=str(alert.id),
-                    asset_id=str(asset.id)
+                    alert_id=normalized_alert_id,
+                    asset_id=str(asset.id),
                 )
-                
+
                 synced["asset_linked"] = True
-        
-        # Load correlation result to get incidents and techniques
+
+        # ------------------------------------------------------
+        # 5. Load CorrelationResult
+        # ------------------------------------------------------
+
         corr_result = await db.execute(
-            select(CorrelationResult).where(
-                CorrelationResult.alert_id == uuid_obj
+            select(CorrelationResult)
+            .where(
+                CorrelationResult.alert_id
+                == uuid_obj
+            )
+            .order_by(
+                CorrelationResult.created_at.desc()
             )
         )
-        correlation = corr_result.scalar_one_or_none()
-        
+
+        # We only need the newest correlation result.
+        correlation = (
+            corr_result.scalars().first()
+        )
+
         if correlation:
-            # Link to Incidents
-            matched_incidents = correlation.matched_incident_ids or []
-            
+
+            # --------------------------------------------------
+            # 6. Synchronize Incidents
+            # --------------------------------------------------
+
+            matched_incidents = (
+                correlation.matched_incident_ids
+                or []
+            )
+
             for incident_uuid in matched_incidents:
+
+                try:
+                    incident_uuid_obj = UUID(
+                        str(incident_uuid)
+                    )
+                except (
+                    ValueError,
+                    TypeError,
+                    AttributeError,
+                ):
+                    continue
+
                 incident_result = await db.execute(
-                    select(Incident).where(Incident.id == incident_uuid)
+                    select(Incident).where(
+                        Incident.id
+                        == incident_uuid_obj
+                    )
                 )
-                incident = incident_result.scalar_one_or_none()
-                
-                if incident:
-                    await self.create_incident_node(
-                        incident_id=str(incident.id),
-                        title=incident.title or "unknown",
-                        severity=incident.severity or "unknown"
-                    )
-                    
-                    await self.link_alert_to_incident(
-                        alert_id=str(alert.id),
-                        incident_id=str(incident.id)
-                    )
-                    
-                    synced["incidents_linked"] += 1
-            
-            # Link to MITRE Techniques
-            matched_techniques = correlation.matched_mitre_techniques or []
-            
+
+                incident = (
+                    incident_result.scalar_one_or_none()
+                )
+
+                if not incident:
+                    continue
+
+                await self.create_incident_node(
+                    incident_id=str(
+                        incident.id
+                    ),
+                    title=str(
+                        incident.title
+                        or "unknown"
+                    ),
+                    severity=str(
+                        incident.severity
+                        or "unknown"
+                    ),
+                )
+
+                await self.link_alert_to_incident(
+                    alert_id=normalized_alert_id,
+                    incident_id=str(
+                        incident.id
+                    ),
+                )
+
+                synced[
+                    "incidents_linked"
+                ] += 1
+
+            # --------------------------------------------------
+            # 7. Synchronize MITRE Techniques
+            # --------------------------------------------------
+
+            matched_techniques = (
+                correlation.matched_mitre_techniques
+                or []
+            )
+
             for technique_id in matched_techniques:
-                # Extract technique name from ID if possible (e.g., T1110 -> Brute Force)
-                technique_name = f"Technique {technique_id}"
-                
+
+                if technique_id is None:
+                    continue
+
+                technique_id = str(
+                    technique_id
+                ).strip()
+
+                if not technique_id:
+                    continue
+
+                technique_name = (
+                    f"Technique {technique_id}"
+                )
+
                 await self.create_technique_node(
                     technique_id=technique_id,
-                    name=technique_name
+                    name=technique_name,
                 )
-                
+
                 await self.link_alert_to_technique(
-                    alert_id=str(alert.id),
-                    technique_id=technique_id
+                    alert_id=normalized_alert_id,
+                    technique_id=technique_id,
                 )
-                
-                synced["techniques_linked"] += 1
-        
+
+                synced[
+                    "techniques_linked"
+                ] += 1
+
         return {
             "success": True,
-            "alert_id": str(alert.id),
-            **synced
+            "alert_id": normalized_alert_id,
+            **synced,
         }
 
     # ==========================================================
     # NODE CREATION
     # ==========================================================
+
+    async def create_alert_node(
+        self,
+        alert_id: str,
+        alert_type: str,
+        severity: str,
+    ):
+        """Create or update an Alert node."""
+
+        await self._run(
+            """
+            MERGE (a:Alert {id: $alert_id})
+
+            SET
+                a.alert_type = $alert_type,
+                a.severity = $severity
+            """,
+            {
+                "alert_id": str(alert_id),
+                "alert_type": str(
+                    alert_type or "unknown"
+                ),
+                "severity": str(
+                    severity or "unknown"
+                ),
+            },
+        )
 
     async def create_asset_node(
         self,
@@ -298,33 +511,16 @@ class Neo4jService:
                 a.criticality = $criticality
             """,
             {
-                "asset_id": asset_id,
-                "hostname": hostname,
-                "ip": ip,
-                "criticality": criticality,
-            },
-        )
-
-    async def create_alert_node(
-        self,
-        alert_id: str,
-        alert_type: str,
-        severity: str,
-    ):
-        """Create or update an Alert node."""
-
-        await self._run(
-            """
-            MERGE (a:Alert {id: $alert_id})
-
-            SET
-                a.alert_type = $alert_type,
-                a.severity = $severity
-            """,
-            {
-                "alert_id": alert_id,
-                "alert_type": alert_type,
-                "severity": severity,
+                "asset_id": str(asset_id),
+                "hostname": str(
+                    hostname or "unknown"
+                ),
+                "ip": str(
+                    ip or "unknown"
+                ),
+                "criticality": str(
+                    criticality or "unknown"
+                ),
             },
         )
 
@@ -345,9 +541,15 @@ class Neo4jService:
                 i.severity = $severity
             """,
             {
-                "incident_id": incident_id,
-                "title": title,
-                "severity": severity,
+                "incident_id": str(
+                    incident_id
+                ),
+                "title": str(
+                    title or "unknown"
+                ),
+                "severity": str(
+                    severity or "unknown"
+                ),
             },
         )
 
@@ -356,7 +558,7 @@ class Neo4jService:
         technique_id: str,
         name: str,
     ):
-        """Create or update a MITRE ATT&CK Technique node."""
+        """Create or update a MITRE Technique node."""
 
         await self._run(
             """
@@ -366,8 +568,12 @@ class Neo4jService:
                 t.name = $name
             """,
             {
-                "technique_id": technique_id,
-                "name": name,
+                "technique_id": str(
+                    technique_id
+                ),
+                "name": str(
+                    name or technique_id
+                ),
             },
         )
 
@@ -380,7 +586,7 @@ class Neo4jService:
         alert_id: str,
         asset_id: str,
     ):
-        """Alert -> Asset."""
+        """Create Alert -> Asset TARGETS relationship."""
 
         await self._run(
             """
@@ -391,8 +597,8 @@ class Neo4jService:
             MERGE (a)-[:TARGETS]->(b)
             """,
             {
-                "alert_id": alert_id,
-                "asset_id": asset_id,
+                "alert_id": str(alert_id),
+                "asset_id": str(asset_id),
             },
         )
 
@@ -401,7 +607,7 @@ class Neo4jService:
         alert_id: str,
         incident_id: str,
     ):
-        """Alert -> Incident."""
+        """Create Alert -> Incident relationship."""
 
         await self._run(
             """
@@ -412,8 +618,8 @@ class Neo4jService:
             MERGE (a)-[:CORRELATES_TO]->(i)
             """,
             {
-                "alert_id": alert_id,
-                "incident_id": incident_id,
+                "alert_id": str(alert_id),
+                "incident_id": str(incident_id),
             },
         )
 
@@ -422,7 +628,7 @@ class Neo4jService:
         alert_id: str,
         technique_id: str,
     ):
-        """Alert -> MITRE Technique."""
+        """Create Alert -> Technique relationship."""
 
         await self._run(
             """
@@ -433,8 +639,10 @@ class Neo4jService:
             MERGE (a)-[:USES_TECHNIQUE]->(t)
             """,
             {
-                "alert_id": alert_id,
-                "technique_id": technique_id,
+                "alert_id": str(alert_id),
+                "technique_id": str(
+                    technique_id
+                ),
             },
         )
 
@@ -444,7 +652,7 @@ class Neo4jService:
         asset_b_id: str,
         protocol: str = "unknown",
     ):
-        """Asset -> Asset network relationship."""
+        """Create Asset -> Asset CONNECTED_TO relationship."""
 
         await self._run(
             """
@@ -461,9 +669,11 @@ class Neo4jService:
             )
             """,
             {
-                "a_id": asset_a_id,
-                "b_id": asset_b_id,
-                "protocol": protocol,
+                "a_id": str(asset_a_id),
+                "b_id": str(asset_b_id),
+                "protocol": str(
+                    protocol or "unknown"
+                ),
             },
         )
 
@@ -479,31 +689,73 @@ class Neo4jService:
         """
         Return a JSON-safe graph for Attack Replay.
 
-        First checks if the Alert node exists in Neo4j.
-        If not, returns an honest response indicating the graph
-        needs to be populated.
+        Response:
 
-        The response contains:
-
-            {
-                "alert_id": "...",
-                "nodes": [...],
-                "edges": [...],
-                "message": "..." (optional)
-            }
-
-        This is intentionally converted here instead of returning
-        raw Neo4j Path objects to FastAPI.
+        {
+            "alert_id": "...",
+            "nodes": [
+                {
+                    "id": "...",
+                    "type": "alert",
+                    "labels": ["Alert"],
+                    "properties": {...}
+                }
+            ],
+            "edges": [
+                {
+                    "id": "...",
+                    "source": "...",
+                    "target": "...",
+                    "relationship": "TARGETS",
+                    "type": "default"
+                }
+            ]
+        }
         """
 
-        if max_depth < 1:
-            max_depth = 1
+        # ------------------------------------------------------
+        # Normalize UUID
+        # ------------------------------------------------------
 
-        if max_depth > 5:
-            max_depth = 5
+        try:
+            alert_uuid = UUID(str(alert_id))
+        except (
+            ValueError,
+            TypeError,
+            AttributeError,
+        ):
+            return {
+                "alert_id": str(alert_id),
+                "nodes": [],
+                "edges": [],
+                "message": (
+                    "Invalid alert UUID."
+                ),
+            }
+
+        normalized_alert_id = str(
+            alert_uuid
+        )
 
         # ------------------------------------------------------
-        # First, check if the Alert node exists
+        # Limit traversal depth
+        # ------------------------------------------------------
+
+        try:
+            max_depth = int(max_depth)
+        except (
+            ValueError,
+            TypeError,
+        ):
+            max_depth = 3
+
+        max_depth = max(
+            1,
+            min(max_depth, 5),
+        )
+
+        # ------------------------------------------------------
+        # Check Alert node
         # ------------------------------------------------------
 
         check_query = """
@@ -514,27 +766,26 @@ class Neo4jService:
         check_results = await self._run(
             check_query,
             {
-                "alert_id": alert_id,
+                "alert_id": normalized_alert_id,
             },
         )
 
-        if not check_results or not check_results[0].get("start"):
-            # Alert node does not exist in Neo4j
+        if (
+            not check_results
+            or not check_results[0].get("start")
+        ):
             return {
-                "alert_id": alert_id,
+                "alert_id": normalized_alert_id,
                 "nodes": [],
                 "edges": [],
                 "message": (
                     "Alert node not found in Neo4j. "
-                    "The graph may need to be synchronized from PostgreSQL."
-                )
+                    "The graph has not been synchronized yet."
+                ),
             }
 
         # ------------------------------------------------------
-        # Find the alert and all connected graph entities.
-        #
-        # Direction is deliberately unrestricted so the replay
-        # can show the complete local attack graph.
+        # Find connected nodes
         # ------------------------------------------------------
 
         query = f"""
@@ -555,21 +806,25 @@ class Neo4jService:
         results = await self._run(
             query,
             {
-                "alert_id": alert_id,
+                "alert_id": normalized_alert_id,
             },
         )
 
         if not results:
             return {
-                "alert_id": alert_id,
+                "alert_id": normalized_alert_id,
                 "nodes": [],
                 "edges": [],
-                "message": "Alert exists but no related Neo4j relationships were found."
+                "message": (
+                    "Alert exists but no related "
+                    "Neo4j relationships were found."
+                ),
             }
 
         record = results[0]
 
         start_node = record.get("start")
+
         related_nodes = record.get(
             "related_nodes",
             [],
@@ -579,9 +834,16 @@ class Neo4jService:
         # Node serialization
         # ------------------------------------------------------
 
-        node_map: Dict[str, Dict[str, Any]] = {}
+        node_map: Dict[
+            str,
+            Dict[str, Any],
+        ] = {}
 
         def serialize_node(node):
+            """
+            Convert a Neo4j Node into the frontend format.
+            """
+
             if node is None:
                 return None
 
@@ -589,18 +851,25 @@ class Neo4jService:
                 node.items()
             )
 
-            node_id = str(
-                properties.get("id")
+            # IMPORTANT:
+            # Do not convert missing ID into "None".
+            node_id = properties.get(
+                "id"
             )
 
-            labels = list(
-                node.labels
-            )
-
-            if not node_id:
+            if node_id is None:
                 return None
 
-            # Determine graph type
+            node_id = str(
+                node_id
+            )
+
+            labels = [
+                str(label)
+                for label in node.labels
+            ]
+
+            # Determine frontend node type.
             if "Alert" in labels:
                 node_type = "alert"
 
@@ -616,28 +885,64 @@ class Neo4jService:
             else:
                 node_type = "unknown"
 
+            # Make all property values JSON safe.
+            safe_properties = {}
+
+            for key, value in properties.items():
+
+                if value is None:
+                    safe_properties[
+                        key
+                    ] = None
+
+                elif isinstance(
+                    value,
+                    (
+                        str,
+                        int,
+                        float,
+                        bool,
+                    ),
+                ):
+                    safe_properties[
+                        key
+                    ] = value
+
+                else:
+                    safe_properties[
+                        key
+                    ] = str(value)
+
             return {
                 "id": node_id,
                 "type": node_type,
                 "labels": labels,
-                "properties": properties,
+                "properties": safe_properties,
             }
 
-        # Add starting alert
-        serialized = serialize_node(
-            start_node
+        # ------------------------------------------------------
+        # Add starting Alert
+        # ------------------------------------------------------
+
+        serialized_start = (
+            serialize_node(
+                start_node
+            )
         )
 
-        if serialized:
+        if serialized_start:
             node_map[
-                serialized["id"]
-            ] = serialized
+                serialized_start["id"]
+            ] = serialized_start
 
+        # ------------------------------------------------------
         # Add connected nodes
+        # ------------------------------------------------------
+
         for node in related_nodes:
 
-            serialized = serialize_node(
-                node
+            serialized = (
+                serialize_node(node)
             )
 
             if serialized:
@@ -648,16 +953,16 @@ class Neo4jService:
         # ------------------------------------------------------
         # Retrieve relationships separately.
         #
-        # This is much easier to serialize than raw Path objects.
+        # This avoids returning raw Neo4j Path objects.
         # ------------------------------------------------------
 
         relationship_query = f"""
         MATCH
             (start:Alert {{id: $alert_id}})
-            -[r*1..{max_depth}]-
+            -[relationships*1..{max_depth}]-
             (related)
 
-        UNWIND r AS relationship
+        UNWIND relationships AS relationship
 
         WITH DISTINCT
             startNode(relationship) AS source,
@@ -673,11 +978,17 @@ class Neo4jService:
         relationship_rows = await self._run(
             relationship_query,
             {
-                "alert_id": alert_id,
+                "alert_id": normalized_alert_id,
             },
         )
 
-        edges: List[Dict[str, Any]] = []
+        # ------------------------------------------------------
+        # Serialize edges
+        # ------------------------------------------------------
+
+        edges: List[
+            Dict[str, Any]
+        ] = []
 
         edge_seen = set()
 
@@ -695,20 +1006,44 @@ class Neo4jService:
                 "relationship_type"
             )
 
-            source_data = serialize_node(
-                source
-            )
-
-            target_data = serialize_node(
-                target
-            )
-
-            if not source_data or not target_data:
+            if (
+                source is None
+                or target is None
+                or relationship_type is None
+            ):
                 continue
 
-            source_id = source_data["id"]
-            target_id = target_data["id"]
+            source_data = (
+                serialize_node(
+                    source
+                )
+            )
 
+            target_data = (
+                serialize_node(
+                    target
+                )
+            )
+
+            if (
+                not source_data
+                or not target_data
+            ):
+                continue
+
+            source_id = source_data[
+                "id"
+            ]
+
+            target_id = target_data[
+                "id"
+            ]
+
+            relationship_type = str(
+                relationship_type
+            )
+
+            # Ensure both nodes exist.
             node_map[
                 source_id
             ] = source_data
@@ -717,6 +1052,7 @@ class Neo4jService:
                 target_id
             ] = target_data
 
+            # Prevent duplicate edges.
             edge_key = (
                 source_id,
                 relationship_type,
@@ -739,23 +1075,29 @@ class Neo4jService:
                     ),
                     "source": source_id,
                     "target": target_id,
+                    "relationship": (
+                        relationship_type
+                    ),
                     "type": "default",
-                    "relationship": relationship_type,
                 }
             )
 
+        # ------------------------------------------------------
+        # Final response
+        # ------------------------------------------------------
+
         response = {
-            "alert_id": alert_id,
+            "alert_id": normalized_alert_id,
             "nodes": list(
                 node_map.values()
             ),
             "edges": edges,
         }
 
-        # Add message if no relationships found
         if not edges:
             response["message"] = (
-                "Alert exists but no related Neo4j relationships were found."
+                "Alert exists but no related "
+                "Neo4j relationships were found."
             )
 
         return response
@@ -769,13 +1111,34 @@ class Neo4jService:
         alert_id: str,
         max_depth: int = 3,
     ) -> List[dict]:
-        """Find correlation paths from an alert."""
+        """
+        Find correlation paths from an alert.
 
-        if max_depth < 1:
-            max_depth = 1
+        This method remains available for the existing
+        LangGraph correlation pipeline.
+        """
 
-        if max_depth > 5:
-            max_depth = 5
+        try:
+            alert_uuid = UUID(
+                str(alert_id)
+            )
+            normalized_alert_id = str(
+                alert_uuid
+            )
+        except (
+            ValueError,
+            TypeError,
+            AttributeError,
+        ):
+            return []
+
+        max_depth = max(
+            1,
+            min(
+                int(max_depth),
+                5,
+            ),
+        )
 
         results = await self._run(
             f"""
@@ -787,7 +1150,7 @@ class Neo4jService:
             RETURN path
             """,
             {
-                "alert_id": alert_id,
+                "alert_id": normalized_alert_id,
             },
         )
 
@@ -799,6 +1162,20 @@ class Neo4jService:
     ) -> List[dict]:
         """Find attack patterns originating from an asset."""
 
+        try:
+            asset_uuid = UUID(
+                str(asset_id)
+            )
+            normalized_asset_id = str(
+                asset_uuid
+            )
+        except (
+            ValueError,
+            TypeError,
+            AttributeError,
+        ):
+            return []
+
         results = await self._run(
             """
             MATCH
@@ -807,22 +1184,28 @@ class Neo4jService:
                 (alert:Alert)
 
             OPTIONAL MATCH
-                (alert)-[:USES_TECHNIQUE]->(tech:Technique)
+                (alert)-[:USES_TECHNIQUE]->
+                (tech:Technique)
 
             OPTIONAL MATCH
-                (alert)-[:CORRELATES_TO]->(inc:Incident)
+                (alert)-[:CORRELATES_TO]->
+                (inc:Incident)
 
             RETURN
                 alert.id AS alert_id,
                 alert.alert_type AS alert_type,
                 alert.severity AS severity,
-                collect(DISTINCT tech.id) AS techniques,
-                collect(DISTINCT inc.id) AS incidents
+                collect(
+                    DISTINCT tech.id
+                ) AS techniques,
+                collect(
+                    DISTINCT inc.id
+                ) AS incidents
 
             ORDER BY alert.severity DESC
             """,
             {
-                "asset_id": asset_id,
+                "asset_id": normalized_asset_id,
             },
         )
 
@@ -833,6 +1216,25 @@ class Neo4jService:
         asset_id: str,
     ) -> Dict[str, Any]:
         """Find assets reachable within two hops."""
+
+        try:
+            asset_uuid = UUID(
+                str(asset_id)
+            )
+            normalized_asset_id = str(
+                asset_uuid
+            )
+        except (
+            ValueError,
+            TypeError,
+            AttributeError,
+        ):
+            return {
+                "source_asset": str(
+                    asset_id
+                ),
+                "blast_radius": [],
+            }
 
         results = await self._run(
             """
@@ -848,12 +1250,12 @@ class Neo4jService:
                 reachable.criticality AS criticality
             """,
             {
-                "asset_id": asset_id,
+                "asset_id": normalized_asset_id,
             },
         )
 
         return {
-            "source_asset": asset_id,
+            "source_asset": normalized_asset_id,
             "blast_radius": [
                 dict(row)
                 for row in results
@@ -866,6 +1268,33 @@ class Neo4jService:
         limit: int = 50,
     ) -> List[dict]:
         """Get alert history for an asset."""
+
+        try:
+            asset_uuid = UUID(
+                str(asset_id)
+            )
+            normalized_asset_id = str(
+                asset_uuid
+            )
+        except (
+            ValueError,
+            TypeError,
+            AttributeError,
+        ):
+            return []
+
+        try:
+            limit = int(limit)
+        except (
+            ValueError,
+            TypeError,
+        ):
+            limit = 50
+
+        limit = max(
+            1,
+            min(limit, 500),
+        )
 
         results = await self._run(
             """
@@ -884,7 +1313,7 @@ class Neo4jService:
             LIMIT $limit
             """,
             {
-                "asset_id": asset_id,
+                "asset_id": normalized_asset_id,
                 "limit": limit,
             },
         )
