@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useState } from "react"
 import {
   ReactFlow,
   Background,
@@ -13,9 +13,8 @@ import {
   addEdge,
   Connection,
 } from "@xyflow/react"
-import "@xyflow/react/dist/style.css"
 
-import { useSearchParams } from "next/navigation"
+import "@xyflow/react/dist/style.css"
 
 import { api } from "@/lib/api"
 import { NavHeader } from "@/components/nav-header"
@@ -28,6 +27,7 @@ type GraphNode = {
   properties?: Record<string, any>
 }
 
+
 type GraphEdge = {
   id: string
   source: string
@@ -35,6 +35,7 @@ type GraphEdge = {
   type?: string
   relationship?: string
 }
+
 
 type AttackReplayResponse = {
   alert_id: string
@@ -44,15 +45,14 @@ type AttackReplayResponse = {
 
 
 export default function AttackReplayPage() {
-  const searchParams = useSearchParams()
-
   const [nodes, setNodes, onNodesChange] =
     useNodesState<Node>([])
 
   const [edges, setEdges, onEdgesChange] =
     useEdgesState<Edge>([])
 
-  const [alertId, setAlertId] = useState("")
+  const [alertId, setAlertId] =
+    useState("")
 
   const [loading, setLoading] =
     useState(false)
@@ -70,8 +70,11 @@ export default function AttackReplayPage() {
 
   const onConnect = useCallback(
     (connection: Connection) => {
-      setEdges((eds) =>
-        addEdge(connection, eds)
+      setEdges((currentEdges) =>
+        addEdge(
+          connection,
+          currentEdges
+        )
       )
     },
     [setEdges]
@@ -79,21 +82,7 @@ export default function AttackReplayPage() {
 
 
   // ==========================================================
-  // Read alert ID from URL
-  // ==========================================================
-
-  useEffect(() => {
-    const urlAlertId =
-      searchParams.get("alertId")
-
-    if (urlAlertId) {
-      setAlertId(urlAlertId)
-    }
-  }, [searchParams])
-
-
-  // ==========================================================
-  // Convert Neo4j node to React Flow node
+  // Convert Neo4j node → React Flow node
   // ==========================================================
 
   const convertNode = (
@@ -104,9 +93,14 @@ export default function AttackReplayPage() {
       node.properties || {}
 
     let label = node.id
+
     let borderColor = "#6b7280"
-    let flowType: "input" | "output" | "default" =
-      "default"
+
+    let flowType:
+      | "input"
+      | "output"
+      | "default" = "default"
+
 
     switch (node.type) {
       case "alert":
@@ -117,8 +111,11 @@ export default function AttackReplayPage() {
           }`
 
         borderColor = "#ef4444"
+
         flowType = "input"
+
         break
+
 
       case "asset":
         label =
@@ -129,7 +126,9 @@ export default function AttackReplayPage() {
           }`
 
         borderColor = "#3b82f6"
+
         break
+
 
       case "incident":
         label =
@@ -139,8 +138,11 @@ export default function AttackReplayPage() {
           }`
 
         borderColor = "#f59e0b"
+
         flowType = "output"
+
         break
+
 
       case "technique":
         label =
@@ -151,13 +153,17 @@ export default function AttackReplayPage() {
           }`
 
         borderColor = "#8b5cf6"
+
         break
+
 
       default:
         label =
           `${node.type}: ${node.id}`
+
         break
     }
+
 
     return {
       id: node.id,
@@ -170,7 +176,9 @@ export default function AttackReplayPage() {
 
       position: {
         x: (index % 4) * 300,
-        y: Math.floor(index / 4) * 180,
+        y:
+          Math.floor(index / 4) *
+          180,
       },
 
       style: {
@@ -179,14 +187,15 @@ export default function AttackReplayPage() {
         borderRadius: 8,
         padding: 12,
         minWidth: 190,
-        background: "var(--background)",
+        background:
+          "var(--background)",
       },
     }
   }
 
 
   // ==========================================================
-  // Convert Neo4j edge to React Flow edge
+  // Convert Neo4j edge → React Flow edge
   // ==========================================================
 
   const convertEdge = (
@@ -194,7 +203,10 @@ export default function AttackReplayPage() {
   ): Edge => {
     let stroke = "#6b7280"
 
-    switch (edge.relationship) {
+
+    switch (
+      edge.relationship
+    ) {
       case "TARGETS":
         stroke = "#3b82f6"
         break
@@ -210,18 +222,25 @@ export default function AttackReplayPage() {
       case "CONNECTED_TO":
         stroke = "#06b6d4"
         break
+
+      default:
+        stroke = "#6b7280"
+        break
     }
+
 
     return {
       id: edge.id,
 
       source: edge.source,
+
       target: edge.target,
 
       type: "default",
 
       animated:
-        edge.relationship === "TARGETS",
+        edge.relationship ===
+        "TARGETS",
 
       label:
         edge.relationship || "",
@@ -235,15 +254,21 @@ export default function AttackReplayPage() {
 
 
   // ==========================================================
-  // Build graph from Neo4j API response
+  // Build graph from Neo4j response
   // ==========================================================
 
   const buildGraphFromNeo4j = (
     result: AttackReplayResponse
   ) => {
-    if (!result.nodes?.length) {
+    if (
+      !result.nodes ||
+      result.nodes.length === 0
+    ) {
       setNodes([])
+
       setEdges([])
+
+      setHasTraced(false)
 
       setError(
         "No Neo4j graph data found for this alert. The alert may not have been synchronized to Neo4j yet."
@@ -252,74 +277,97 @@ export default function AttackReplayPage() {
       return
     }
 
+
     const flowNodes =
       result.nodes.map(
         (node, index) =>
-          convertNode(node, index)
+          convertNode(
+            node,
+            index
+          )
       )
+
 
     const flowEdges =
       (result.edges || []).map(
-        convertEdge
+        (edge) =>
+          convertEdge(edge)
       )
 
+
     setNodes(flowNodes)
+
     setEdges(flowEdges)
 
     setError(null)
+
     setHasTraced(true)
   }
 
 
   // ==========================================================
-  // Fetch real Neo4j Attack Replay
+  // Fetch real Attack Replay
   // ==========================================================
 
-  const fetchAttackReplay = async () => {
-    const id =
-      alertId.trim()
+  const fetchAttackReplay =
+    async () => {
+      const id =
+        alertId.trim()
 
-    if (!id) {
-      setError(
-        "Please provide an alert ID."
-      )
 
-      return
-    }
-
-    setLoading(true)
-    setError(null)
-    setHasTraced(false)
-
-    try {
-      const result =
-        await api.get<AttackReplayResponse>(
-          `/alerts/${encodeURIComponent(
-            id
-          )}/attack-replay`
+      if (!id) {
+        setError(
+          "Please provide an alert ID."
         )
 
-      buildGraphFromNeo4j(result)
+        return
+      }
 
-    } catch (err) {
-      console.error(
-        "Failed to fetch attack replay:",
-        err
-      )
 
-      setNodes([])
-      setEdges([])
+      setLoading(true)
 
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to load attack replay."
-      )
+      setError(null)
 
-    } finally {
-      setLoading(false)
+      setHasTraced(false)
+
+
+      try {
+        const result =
+          await api.get<AttackReplayResponse>(
+            `/alerts/${encodeURIComponent(
+              id
+            )}/attack-replay`
+          )
+
+
+        buildGraphFromNeo4j(
+          result
+        )
+
+      } catch (err) {
+        console.error(
+          "Failed to fetch attack replay:",
+          err
+        )
+
+
+        setNodes([])
+
+        setEdges([])
+
+        setHasTraced(false)
+
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Failed to load attack replay."
+        )
+
+      } finally {
+        setLoading(false)
+      }
     }
-  }
 
 
   // ==========================================================
@@ -330,6 +378,7 @@ export default function AttackReplayPage() {
     const demoNodes: Node[] = [
       {
         id: "alert-1",
+
         type: "input",
 
         data: {
@@ -343,10 +392,13 @@ export default function AttackReplayPage() {
         },
 
         style: {
-          borderColor: "#ef4444",
+          borderColor:
+            "#ef4444",
+
           borderWidth: 2,
         },
       },
+
 
       {
         id: "asset-1",
@@ -362,13 +414,17 @@ export default function AttackReplayPage() {
         },
 
         style: {
-          borderColor: "#3b82f6",
+          borderColor:
+            "#3b82f6",
+
           borderWidth: 2,
         },
       },
 
+
       {
         id: "alert-2",
+
         type: "input",
 
         data: {
@@ -382,10 +438,13 @@ export default function AttackReplayPage() {
         },
 
         style: {
-          borderColor: "#ef4444",
+          borderColor:
+            "#ef4444",
+
           borderWidth: 2,
         },
       },
+
 
       {
         id: "asset-2",
@@ -401,13 +460,17 @@ export default function AttackReplayPage() {
         },
 
         style: {
-          borderColor: "#3b82f6",
+          borderColor:
+            "#3b82f6",
+
           borderWidth: 2,
         },
       },
 
+
       {
         id: "incident-1",
+
         type: "output",
 
         data: {
@@ -421,16 +484,20 @@ export default function AttackReplayPage() {
         },
 
         style: {
-          borderColor: "#f59e0b",
+          borderColor:
+            "#f59e0b",
+
           borderWidth: 2,
         },
       },
+
 
       {
         id: "technique-1",
 
         data: {
-          label: "MITRE: T1110",
+          label:
+            "MITRE: T1110",
         },
 
         position: {
@@ -439,10 +506,13 @@ export default function AttackReplayPage() {
         },
 
         style: {
-          borderColor: "#8b5cf6",
+          borderColor:
+            "#8b5cf6",
+
           borderWidth: 2,
         },
       },
+
 
       {
         id: "technique-2",
@@ -458,7 +528,9 @@ export default function AttackReplayPage() {
         },
 
         style: {
-          borderColor: "#8b5cf6",
+          borderColor:
+            "#8b5cf6",
+
           borderWidth: 2,
         },
       },
@@ -468,72 +540,106 @@ export default function AttackReplayPage() {
     const demoEdges: Edge[] = [
       {
         id: "e1",
+
         source: "alert-1",
+
         target: "asset-1",
+
         animated: true,
 
         style: {
-          stroke: "#ef4444",
+          stroke:
+            "#ef4444",
         },
       },
+
 
       {
         id: "e2",
+
         source: "alert-1",
+
         target: "technique-1",
 
         style: {
-          stroke: "#8b5cf6",
+          stroke:
+            "#8b5cf6",
         },
       },
+
 
       {
         id: "e3",
+
         source: "alert-2",
+
         target: "asset-2",
+
         animated: true,
 
         style: {
-          stroke: "#ef4444",
+          stroke:
+            "#ef4444",
         },
       },
+
 
       {
         id: "e4",
+
         source: "asset-1",
+
         target: "asset-2",
 
         style: {
-          stroke: "#3b82f6",
-          strokeDasharray: "5 5",
+          stroke:
+            "#3b82f6",
+
+          strokeDasharray:
+            "5 5",
         },
       },
+
 
       {
         id: "e5",
+
         source: "alert-2",
+
         target: "incident-1",
 
         style: {
-          stroke: "#f59e0b",
+          stroke:
+            "#f59e0b",
         },
       },
 
+
       {
         id: "e6",
+
         source: "alert-2",
+
         target: "technique-2",
 
         style: {
-          stroke: "#8b5cf6",
+          stroke:
+            "#8b5cf6",
         },
       },
     ]
 
-    setNodes(demoNodes)
-    setEdges(demoEdges)
+
+    setNodes(
+      demoNodes
+    )
+
+    setEdges(
+      demoEdges
+    )
 
     setError(null)
+
     setHasTraced(false)
   }
 
@@ -545,11 +651,16 @@ export default function AttackReplayPage() {
   return (
     <div className="min-h-screen bg-background">
 
-      <NavHeader title="Attack Replay" />
+      <NavHeader
+        title="Attack Replay"
+      />
+
 
       <main className="p-6">
 
-        {/* Controls */}
+        {/* ================================================= */}
+        {/* Search / Controls */}
+        {/* ================================================= */}
 
         <div className="flex gap-4 mb-4">
 
@@ -558,13 +669,18 @@ export default function AttackReplayPage() {
             placeholder="Enter full alert UUID..."
             value={alertId}
             onChange={(e) =>
-              setAlertId(e.target.value)
+              setAlertId(
+                e.target.value
+              )
             }
             className="flex-1 px-4 py-2 rounded-md border border-border bg-background font-mono text-sm"
           />
 
+
           <button
-            onClick={fetchAttackReplay}
+            onClick={
+              fetchAttackReplay
+            }
             disabled={
               loading ||
               !alertId.trim()
@@ -576,8 +692,11 @@ export default function AttackReplayPage() {
               : "Trace"}
           </button>
 
+
           <button
-            onClick={buildDemoGraph}
+            onClick={
+              buildDemoGraph
+            }
             disabled={loading}
             className="px-4 py-2 rounded-md border border-border hover:bg-muted text-sm"
           >
@@ -587,7 +706,9 @@ export default function AttackReplayPage() {
         </div>
 
 
+        {/* ================================================= */}
         {/* Error */}
+        {/* ================================================= */}
 
         {error && (
           <div className="mb-4 rounded-lg border border-red-500/50 bg-red-500/10 p-4">
@@ -604,7 +725,9 @@ export default function AttackReplayPage() {
         )}
 
 
+        {/* ================================================= */}
         {/* Success */}
+        {/* ================================================= */}
 
         {hasTraced &&
           !error && (
@@ -622,7 +745,9 @@ export default function AttackReplayPage() {
           )}
 
 
-        {/* Graph */}
+        {/* ================================================= */}
+        {/* React Flow */}
+        {/* ================================================= */}
 
         <div className="h-[600px] rounded-lg border border-border overflow-hidden">
 
@@ -635,7 +760,9 @@ export default function AttackReplayPage() {
             onEdgesChange={
               onEdgesChange
             }
-            onConnect={onConnect}
+            onConnect={
+              onConnect
+            }
             fitView
           >
 
@@ -650,7 +777,9 @@ export default function AttackReplayPage() {
         </div>
 
 
-        {/* Legend */}
+        {/* ================================================= */}
+        {/* Explanation */}
+        {/* ================================================= */}
 
         <div className="mt-4 text-sm text-muted-foreground">
 
@@ -663,20 +792,25 @@ export default function AttackReplayPage() {
             with an alert.
           </p>
 
+
           <p className="mt-1">
             Red = Alert · Blue = Asset ·
             Amber = Incident · Purple =
-            MITRE ATT&amp;CK · Cyan = CVE.
+            MITRE ATT&amp;CK · Cyan =
+            Network connection.
           </p>
+
 
           <p className="mt-1">
-            Relationships are taken directly
-            from Neo4j.
+            Relationships are taken
+            directly from Neo4j.
           </p>
 
+
           <p className="mt-2 text-xs">
-            Demo uses sample data. Trace uses
-            the authenticated backend.
+            Demo uses sample data.
+            Trace uses the authenticated
+            backend.
           </p>
 
         </div>
