@@ -1,6 +1,7 @@
 """Alerts router: ingest, correlate, attack replay, parse log files."""
 
 import uuid
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -9,6 +10,7 @@ from fastapi import (
     UploadFile,
     File,
 )
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 from typing import List
@@ -22,10 +24,8 @@ from app.schemas import (
     ParsedAlerts,
 )
 from app.auth import get_current_user, require_role
-
 from app.graph.builder import build_graph
 from app.graph.state import IncidentState
-
 from app.services.langfuse_trace import tracer
 from app.services.bm25 import BM25Search
 from app.services.neo4j_service import neo4j_service
@@ -49,9 +49,7 @@ async def list_alerts(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """
-    Get all alerts from PostgreSQL.
-    """
+    """Get all alerts from PostgreSQL."""
 
     result = await db.execute(
         select(Alert).order_by(
@@ -59,9 +57,7 @@ async def list_alerts(
         )
     )
 
-    alerts = result.scalars().all()
-
-    return alerts
+    return result.scalars().all()
 
 
 # ============================================================
@@ -83,9 +79,7 @@ async def ingest_alert(
         )
     ),
 ):
-    """
-    Ingest a raw SIEM alert.
-    """
+    """Ingest a raw SIEM alert."""
 
     alert = Alert(
         source=payload.source,
@@ -175,7 +169,7 @@ async def ingest_alert(
 
 
 # ============================================================
-# ATTACK REPLAY — NEO4J WITH SYNC-ON-DEMAND
+# ATTACK REPLAY
 # ============================================================
 
 @router.get(
@@ -189,64 +183,76 @@ async def get_attack_replay(
     """
     Return the Neo4j attack graph for an alert.
 
-    The response contains JSON-safe nodes and edges
-    suitable for React Flow.
+    Flow:
 
-    If the alert node does not exist in Neo4j, this endpoint
-    will first synchronize it from PostgreSQL before querying
-    the graph.
+    1. Validate alert UUID.
+    2. Verify alert exists in PostgreSQL.
+    3. Synchronize PostgreSQL data into Neo4j.
+    4. Query Neo4j.
+    5. Return JSON-safe nodes and edges.
+
+    Response:
+
+    {
+        "alert_id": "...",
+        "nodes": [...],
+        "edges": [...]
+    }
     """
 
+    # ========================================================
+    # 1. Validate UUID
+    # ========================================================
+
     try:
-        # First, check if the alert exists in PostgreSQL
-        result = await db.execute(
-            select(Alert).where(Alert.id == alert_id)
-        )
-        alert = result.scalar_one_or_none()
-
-        if not alert:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Alert not found: {alert_id}",
-            )
-
-        # Check if alert exists in Neo4j
-        check_result = await neo4j_service._run(
-            "MATCH (a:Alert {id: $alert_id}) RETURN a",
-            {"alert_id": alert_id},
+        alert_uuid = UUID(str(alert_id))
+    except (
+        ValueError,
+        TypeError,
+        AttributeError,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid alert ID. "
+                "A full UUID is required."
+            ),
         )
 
-        # If alert doesn't exist in Neo4j, sync it from PostgreSQL
-        if not check_result:
-            sync_result = await neo4j_service.sync_alert_from_postgres(
+    normalized_alert_id = str(alert_uuid)
+
+    # ========================================================
+    # 2. Verify PostgreSQL alert exists
+    # ========================================================
+
+    result = await db.execute(
+        select(Alert).where(
+            Alert.id == alert_uuid
+        )
+    )
+
+    alert = result.scalar_one_or_none()
+
+    if not alert:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Alert not found: "
+                f"{normalized_alert_id}"
+            ),
+        )
+
+    # ========================================================
+    # 3. Synchronize alert into Neo4j
+    # ========================================================
+
+    try:
+        sync_result = (
+            await neo4j_service.sync_alert_from_postgres(
                 db=db,
-                alert_id=alert_id,
+                alert_id=normalized_alert_id,
             )
-
-            if not sync_result.get("success"):
-                # Sync failed but alert exists in PostgreSQL
-                # Return empty graph with informative message
-                return {
-                    "alert_id": alert_id,
-                    "nodes": [],
-                    "edges": [],
-                    "message": (
-                        "Alert exists in PostgreSQL but could not be "
-                        "synchronized to Neo4j. "
-                        f"Reason: {sync_result.get('error', 'Unknown error')}"
-                    ),
-                }
-
-        # Now query the graph
-        graph = await neo4j_service.get_attack_replay_graph(
-            alert_id=alert_id,
-            max_depth=3,
         )
-
-        return graph
-
-    except HTTPException:
-        raise
 
     except RuntimeError as exc:
         raise HTTPException(
@@ -258,9 +264,60 @@ async def get_attack_replay(
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Failed to load attack replay: {exc}"
+                "Failed to synchronize alert "
+                f"with Neo4j: {exc}"
             ),
         )
+
+    # --------------------------------------------------------
+    # Synchronization failed
+    # --------------------------------------------------------
+
+    if not sync_result.get("success"):
+        return {
+            "alert_id": normalized_alert_id,
+            "nodes": [],
+            "edges": [],
+            "message": (
+                "Alert exists in PostgreSQL but "
+                "could not be synchronized to Neo4j. "
+                f"Reason: "
+                f"{sync_result.get('error', 'Unknown error')}"
+            ),
+        }
+
+    # ========================================================
+    # 4. Query attack replay graph
+    # ========================================================
+
+    try:
+        graph = (
+            await neo4j_service.get_attack_replay_graph(
+                alert_id=normalized_alert_id,
+                max_depth=3,
+            )
+        )
+
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to load attack replay "
+                f"from Neo4j: {exc}"
+            ),
+        )
+
+    # ========================================================
+    # 5. Return graph
+    # ========================================================
+
+    return graph
 
 
 # ============================================================
@@ -281,13 +338,31 @@ async def correlate_alert(
         )
     ),
 ):
-    """
-    Trigger LangGraph correlation for an alert.
-    """
+    """Trigger LangGraph correlation for an alert."""
+
+    # --------------------------------------------------------
+    # Validate UUID
+    # --------------------------------------------------------
+
+    try:
+        alert_uuid = UUID(str(alert_id))
+    except (
+        ValueError,
+        TypeError,
+        AttributeError,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid alert UUID.",
+        )
+
+    # --------------------------------------------------------
+    # Find alert
+    # --------------------------------------------------------
 
     result = await db.execute(
         select(Alert).where(
-            Alert.id == alert_id
+            Alert.id == alert_uuid
         )
     )
 
@@ -303,46 +378,47 @@ async def correlate_alert(
     # Initial LangGraph state
     # --------------------------------------------------------
 
+    raw_alert = (
+        dict(alert.raw_alert)
+        if isinstance(
+            alert.raw_alert,
+            dict,
+        )
+        else {}
+    )
+
+    raw_alert["id"] = str(
+        alert.id
+    )
+
     initial_state: IncidentState = {
-        "raw_alert": {
-            **alert.raw_alert,
-            "id": str(alert.id),
-        },
-
+        "raw_alert": raw_alert,
         "asset_context": {},
-
         "similar_incidents": [],
-
         "relevant_cves": [],
-
         "mitre_techniques": [],
-
         "neo4j_paths": [],
-
         "reasoning": "",
-
         "verdict": None,
-
         "confidence": 0.0,
-
         "grounding_passed": False,
-
         "retry_count": 0,
-
         "severity": None,
-
         "escalate": False,
-
         "report": "",
     }
 
-    trace_id = str(uuid.uuid4())
+    trace_id = str(
+        uuid.uuid4()
+    )
 
     with tracer.trace_node(
         trace_id,
         "correlate_alert",
         {
-            "alert_id": alert_id,
+            "alert_id": str(
+                alert.id
+            ),
         },
     ):
         graph = build_graph(db)
@@ -359,7 +435,9 @@ async def correlate_alert(
         )
 
     return {
-        "alert_id": alert_id,
+        "alert_id": str(
+            alert.id
+        ),
         "verdict": final_state.get(
             "verdict"
         ),
@@ -392,14 +470,24 @@ async def get_correlation(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """
-    Get the stored correlation result for an alert.
-    """
+    """Get the stored correlation result for an alert."""
+
+    try:
+        alert_uuid = UUID(str(alert_id))
+    except (
+        ValueError,
+        TypeError,
+        AttributeError,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid alert UUID.",
+        )
 
     result = await db.execute(
         select(CorrelationResult).where(
             CorrelationResult.alert_id
-            == alert_id
+            == alert_uuid
         )
     )
 
@@ -432,10 +520,7 @@ async def parse_evtx_upload(
         )
     ),
 ):
-    """
-    Parse an uploaded EVTX file
-    into normalized alerts.
-    """
+    """Parse an uploaded EVTX file."""
 
     from app.parsers.evtx_parser import (
         parse_evtx_bytes,
@@ -473,10 +558,7 @@ async def parse_csv_upload(
         )
     ),
 ):
-    """
-    Parse an uploaded CSV file
-    into normalized alerts.
-    """
+    """Parse an uploaded CSV file."""
 
     from app.parsers.csv_parser import (
         parse_csv_bytes,
@@ -515,10 +597,7 @@ async def parse_syslog_upload(
         )
     ),
 ):
-    """
-    Parse an uploaded syslog file
-    into normalized alerts.
-    """
+    """Parse an uploaded syslog file."""
 
     from app.parsers.syslog_parser import (
         parse_syslog_stream,
