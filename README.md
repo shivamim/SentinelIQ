@@ -288,16 +288,4 @@ docker-compose up -d postgres neo4j redis backend
 docker build -t sentineliq-backend ./backend
 ```
 
-## Security
 
-- No API keys in source code — all via environment variables
-- `.env` and `.env.local` are gitignored — never commit real credentials
-- Supabase Auth for authentication (no custom JWT implementation)
-- RBAC with three roles: analyst, senior_analyst, admin
-- Audit trail for all actions
-- CORS configured via environment variable
-- Production: required variables validated at startup — no silent localhost fallbacks
-- Development: `LOCAL_DEVELOPMENT=true` enables localhost defaults explicitly
-- Reranker failures are reported, not silently hidden
-- Citations are never fabricated — only actually retrieved chunks are cited
-- RRF scores are reported as `retrieval_score`, not as percentage confidence
