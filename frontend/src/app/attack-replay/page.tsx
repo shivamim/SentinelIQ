@@ -1,11 +1,6 @@
 "use client"
 
-import {
-  useCallback,
-  useEffect,
-  useState,
-} from "react"
-
+import { useCallback, useEffect, useState } from "react"
 import {
   ReactFlow,
   Background,
@@ -18,7 +13,6 @@ import {
   addEdge,
   Connection,
 } from "@xyflow/react"
-
 import "@xyflow/react/dist/style.css"
 
 import { useSearchParams } from "next/navigation"
@@ -27,21 +21,25 @@ import { api } from "@/lib/api"
 import { NavHeader } from "@/components/nav-header"
 
 
-type CorrelationResult = {
+type GraphNode = {
   id: string
+  type: "alert" | "asset" | "incident" | "technique" | "unknown"
+  labels?: string[]
+  properties?: Record<string, any>
+}
+
+type GraphEdge = {
+  id: string
+  source: string
+  target: string
+  type?: string
+  relationship?: string
+}
+
+type AttackReplayResponse = {
   alert_id: string
-
-  matched_incident_ids?: string[] | null
-  matched_cve_ids?: string[] | null
-  matched_mitre_techniques?: string[] | null
-
-  reasoning_text?: string | null
-  confidence_score?: number | null
-  verdict?: string | null
-  grounding_passed?: boolean | null
-  retry_count?: number
-
-  created_at?: string
+  nodes: GraphNode[]
+  edges: GraphEdge[]
 }
 
 
@@ -81,10 +79,7 @@ export default function AttackReplayPage() {
 
 
   // ==========================================================
-  // Read alertId from URL
-  //
-  // Example:
-  // /attack-replay?alertId=2d959777-xxxx-xxxx-xxxx-xxxxxxxx
+  // Read alert ID from URL
   // ==========================================================
 
   useEffect(() => {
@@ -98,235 +93,197 @@ export default function AttackReplayPage() {
 
 
   // ==========================================================
-  // Build graph from actual correlation result
+  // Convert Neo4j node to React Flow node
   // ==========================================================
 
-  const buildGraphFromCorrelation = (
-    correlation: CorrelationResult
-  ) => {
-    const graphNodes: Node[] = []
-    const graphEdges: Edge[] = []
+  const convertNode = (
+    node: GraphNode,
+    index: number
+  ): Node => {
+    const properties =
+      node.properties || {}
 
-    // --------------------------------------------------------
-    // Alert node
-    // --------------------------------------------------------
+    let label = node.id
+    let borderColor = "#6b7280"
+    let flowType: "input" | "output" | "default" =
+      "default"
 
-    const alertNodeId =
-      `alert-${correlation.alert_id}`
+    switch (node.type) {
+      case "alert":
+        label =
+          `Alert: ${
+            properties.alert_type ||
+            "Unknown"
+          }`
 
-    graphNodes.push({
-      id: alertNodeId,
-      type: "input",
+        borderColor = "#ef4444"
+        flowType = "input"
+        break
+
+      case "asset":
+        label =
+          `Asset: ${
+            properties.hostname ||
+            properties.ip ||
+            "Unknown"
+          }`
+
+        borderColor = "#3b82f6"
+        break
+
+      case "incident":
+        label =
+          `Incident: ${
+            properties.title ||
+            "Unknown"
+          }`
+
+        borderColor = "#f59e0b"
+        flowType = "output"
+        break
+
+      case "technique":
+        label =
+          `MITRE: ${
+            properties.name ||
+            properties.id ||
+            "Unknown"
+          }`
+
+        borderColor = "#8b5cf6"
+        break
+
+      default:
+        label =
+          `${node.type}: ${node.id}`
+        break
+    }
+
+    return {
+      id: node.id,
+
+      type: flowType,
 
       data: {
-        label: `Alert\n${correlation.alert_id.slice(0, 8)}`,
+        label,
       },
 
       position: {
-        x: 0,
-        y: 250,
+        x: (index % 4) * 300,
+        y: Math.floor(index / 4) * 180,
       },
 
       style: {
-        borderColor: "#ef4444",
+        borderColor,
         borderWidth: 2,
+        borderRadius: 8,
         padding: 12,
-        minWidth: 180,
+        minWidth: 190,
+        background: "var(--background)",
       },
-    })
-
-
-    // --------------------------------------------------------
-    // Incident nodes
-    // --------------------------------------------------------
-
-    const incidents =
-      correlation.matched_incident_ids || []
-
-    incidents.forEach(
-      (incidentId, index) => {
-        const nodeId =
-          `incident-${incidentId}`
-
-        graphNodes.push({
-          id: nodeId,
-          type: "output",
-
-          data: {
-            label: `Incident\n${incidentId.slice(0, 8)}`,
-          },
-
-          position: {
-            x: 400,
-            y: index * 160,
-          },
-
-          style: {
-            borderColor: "#f59e0b",
-            borderWidth: 2,
-            padding: 12,
-            minWidth: 180,
-          },
-        })
-
-        graphEdges.push({
-          id: `edge-alert-incident-${index}`,
-          source: alertNodeId,
-          target: nodeId,
-
-          animated: true,
-
-          style: {
-            stroke: "#f59e0b",
-          },
-        })
-      }
-    )
-
-
-    // --------------------------------------------------------
-    // MITRE technique nodes
-    // --------------------------------------------------------
-
-    const techniques =
-      correlation.matched_mitre_techniques || []
-
-    techniques.forEach(
-      (technique, index) => {
-        const nodeId =
-          `technique-${technique}-${index}`
-
-        graphNodes.push({
-          id: nodeId,
-
-          data: {
-            label: `MITRE\n${technique}`,
-          },
-
-          position: {
-            x: 400,
-            y: 300 + index * 130,
-          },
-
-          style: {
-            borderColor: "#8b5cf6",
-            borderWidth: 2,
-            padding: 12,
-            minWidth: 180,
-          },
-        })
-
-        graphEdges.push({
-          id: `edge-alert-technique-${index}`,
-          source: alertNodeId,
-          target: nodeId,
-
-          style: {
-            stroke: "#8b5cf6",
-          },
-        })
-      }
-    )
-
-
-    // --------------------------------------------------------
-    // CVE nodes
-    // --------------------------------------------------------
-
-    const cves =
-      correlation.matched_cve_ids || []
-
-    cves.forEach(
-      (cve, index) => {
-        const nodeId =
-          `cve-${cve}-${index}`
-
-        graphNodes.push({
-          id: nodeId,
-
-          data: {
-            label: `CVE\n${cve}`,
-          },
-
-          position: {
-            x: 800,
-            y: index * 130,
-          },
-
-          style: {
-            borderColor: "#06b6d4",
-            borderWidth: 2,
-            padding: 12,
-            minWidth: 180,
-          },
-        })
-
-        graphEdges.push({
-          id: `edge-alert-cve-${index}`,
-          source: alertNodeId,
-          target: nodeId,
-
-          style: {
-            stroke: "#06b6d4",
-          },
-        })
-      }
-    )
-
-
-    // --------------------------------------------------------
-    // If correlation exists but has no relationships
-    // --------------------------------------------------------
-
-    if (
-      graphNodes.length === 1
-    ) {
-      graphNodes.push({
-        id: "no-correlation",
-
-        data: {
-          label:
-            "No correlated entities found",
-        },
-
-        position: {
-          x: 400,
-          y: 250,
-        },
-
-        style: {
-          borderColor: "#6b7280",
-          borderWidth: 1,
-          padding: 12,
-          minWidth: 220,
-        },
-      })
-
-      graphEdges.push({
-        id: "edge-no-correlation",
-        source: alertNodeId,
-        target: "no-correlation",
-
-        style: {
-          stroke: "#6b7280",
-          strokeDasharray: "5 5",
-        },
-      })
     }
-
-
-    setNodes(graphNodes)
-    setEdges(graphEdges)
   }
 
 
   // ==========================================================
-  // Fetch correlation
+  // Convert Neo4j edge to React Flow edge
   // ==========================================================
 
-  const fetchCorrelationGraph = async () => {
-    if (!alertId.trim()) {
-      setError("Please provide an alert ID.")
+  const convertEdge = (
+    edge: GraphEdge
+  ): Edge => {
+    let stroke = "#6b7280"
+
+    switch (edge.relationship) {
+      case "TARGETS":
+        stroke = "#3b82f6"
+        break
+
+      case "CORRELATES_TO":
+        stroke = "#f59e0b"
+        break
+
+      case "USES_TECHNIQUE":
+        stroke = "#8b5cf6"
+        break
+
+      case "CONNECTED_TO":
+        stroke = "#06b6d4"
+        break
+    }
+
+    return {
+      id: edge.id,
+
+      source: edge.source,
+      target: edge.target,
+
+      type: "default",
+
+      animated:
+        edge.relationship === "TARGETS",
+
+      label:
+        edge.relationship || "",
+
+      style: {
+        stroke,
+        strokeWidth: 2,
+      },
+    }
+  }
+
+
+  // ==========================================================
+  // Build graph from Neo4j API response
+  // ==========================================================
+
+  const buildGraphFromNeo4j = (
+    result: AttackReplayResponse
+  ) => {
+    if (!result.nodes?.length) {
+      setNodes([])
+      setEdges([])
+
+      setError(
+        "No Neo4j graph data found for this alert. The alert may not have been synchronized to Neo4j yet."
+      )
+
+      return
+    }
+
+    const flowNodes =
+      result.nodes.map(
+        (node, index) =>
+          convertNode(node, index)
+      )
+
+    const flowEdges =
+      (result.edges || []).map(
+        convertEdge
+      )
+
+    setNodes(flowNodes)
+    setEdges(flowEdges)
+
+    setError(null)
+    setHasTraced(true)
+  }
+
+
+  // ==========================================================
+  // Fetch real Neo4j Attack Replay
+  // ==========================================================
+
+  const fetchAttackReplay = async () => {
+    const id =
+      alertId.trim()
+
+    if (!id) {
+      setError(
+        "Please provide an alert ID."
+      )
+
       return
     }
 
@@ -336,19 +293,17 @@ export default function AttackReplayPage() {
 
     try {
       const result =
-        await api.get<CorrelationResult>(
+        await api.get<AttackReplayResponse>(
           `/alerts/${encodeURIComponent(
-            alertId.trim()
-          )}/correlation`
+            id
+          )}/attack-replay`
         )
 
-      buildGraphFromCorrelation(result)
-
-      setHasTraced(true)
+      buildGraphFromNeo4j(result)
 
     } catch (err) {
       console.error(
-        "Failed to fetch correlation:",
+        "Failed to fetch attack replay:",
         err
       )
 
@@ -358,8 +313,9 @@ export default function AttackReplayPage() {
       setError(
         err instanceof Error
           ? err.message
-          : "Failed to load attack correlation."
+          : "Failed to load attack replay."
       )
+
     } finally {
       setLoading(false)
     }
@@ -368,9 +324,6 @@ export default function AttackReplayPage() {
 
   // ==========================================================
   // Demo graph
-  //
-  // This is ONLY available through the Demo button.
-  // API failure will NEVER show fake data.
   // ==========================================================
 
   const buildDemoGraph = () => {
@@ -585,6 +538,10 @@ export default function AttackReplayPage() {
   }
 
 
+  // ==========================================================
+  // UI
+  // ==========================================================
+
   return (
     <div className="min-h-screen bg-background">
 
@@ -592,9 +549,7 @@ export default function AttackReplayPage() {
 
       <main className="p-6">
 
-        {/* ================================================= */}
         {/* Controls */}
-        {/* ================================================= */}
 
         <div className="flex gap-4 mb-4">
 
@@ -609,12 +564,15 @@ export default function AttackReplayPage() {
           />
 
           <button
-            onClick={fetchCorrelationGraph}
-            disabled={loading || !alertId.trim()}
+            onClick={fetchAttackReplay}
+            disabled={
+              loading ||
+              !alertId.trim()
+            }
             className="px-6 py-2 rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 disabled:opacity-50"
           >
             {loading
-              ? "Loading..."
+              ? "Tracing..."
               : "Trace"}
           </button>
 
@@ -629,15 +587,13 @@ export default function AttackReplayPage() {
         </div>
 
 
-        {/* ================================================= */}
         {/* Error */}
-        {/* ================================================= */}
 
         {error && (
           <div className="mb-4 rounded-lg border border-red-500/50 bg-red-500/10 p-4">
 
             <p className="font-semibold text-red-400">
-              Attack Replay Error
+              Attack Replay
             </p>
 
             <p className="text-sm text-red-300 mt-1">
@@ -648,36 +604,37 @@ export default function AttackReplayPage() {
         )}
 
 
-        {/* ================================================= */}
-        {/* Correlation status */}
-        {/* ================================================= */}
+        {/* Success */}
 
-        {hasTraced && !error && (
-          <div className="mb-4 rounded-lg border border-border bg-card p-4">
+        {hasTraced &&
+          !error && (
+            <div className="mb-4 rounded-lg border border-border bg-card p-4">
 
-            <p className="text-sm">
-              Correlation loaded for:
-            </p>
+              <p className="text-sm">
+                Neo4j attack graph loaded
+              </p>
 
-            <p className="font-mono text-xs text-muted-foreground mt-1">
-              {alertId}
-            </p>
+              <p className="font-mono text-xs text-muted-foreground mt-1">
+                {alertId}
+              </p>
 
-          </div>
-        )}
+            </div>
+          )}
 
 
-        {/* ================================================= */}
         {/* Graph */}
-        {/* ================================================= */}
 
         <div className="h-[600px] rounded-lg border border-border overflow-hidden">
 
           <ReactFlow
             nodes={nodes}
             edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
+            onNodesChange={
+              onNodesChange
+            }
+            onEdgesChange={
+              onEdgesChange
+            }
             onConnect={onConnect}
             fitView
           >
@@ -693,9 +650,7 @@ export default function AttackReplayPage() {
         </div>
 
 
-        {/* ================================================= */}
-        {/* Explanation */}
-        {/* ================================================= */}
+        {/* Legend */}
 
         <div className="mt-4 text-sm text-muted-foreground">
 
@@ -703,23 +658,31 @@ export default function AttackReplayPage() {
             <strong>
               Attack Replay
             </strong>{" "}
-            visualizes correlation data associated
+            visualizes the real Neo4j
+            knowledge graph associated
             with an alert.
           </p>
 
           <p className="mt-1">
-            Red = alerts · Amber = incidents ·
-            Purple = MITRE ATT&amp;CK · Cyan = CVEs.
+            Red = Alert · Blue = Asset ·
+            Amber = Incident · Purple =
+            MITRE ATT&amp;CK · Cyan = CVE.
           </p>
 
-          <p className="mt-1 text-xs">
-            The Demo button shows sample data.
-            Trace uses your authenticated backend.
+          <p className="mt-1">
+            Relationships are taken directly
+            from Neo4j.
+          </p>
+
+          <p className="mt-2 text-xs">
+            Demo uses sample data. Trace uses
+            the authenticated backend.
           </p>
 
         </div>
 
       </main>
+
     </div>
   )
 }
